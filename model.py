@@ -362,7 +362,7 @@ class ProductKeyRouter(nn.Module):
 
         # Each side = sqrt(n_experts)
         self.side = int(args.peer_n_experts**0.5)
-        assert self.side * self.side == args.peer_n_expert, "n_experts must be a perfect square."
+        assert self.side * self.side == args.peer_n_experts, "n_experts must be a perfect square."
         assert args.peer_query_dim % 2 == 0, "query_dim must be even for product-key routing."
         self.sub_dim = args.peer_query_dim // 2
 
