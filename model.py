@@ -377,7 +377,7 @@ class ProductKeyRouter(nn.Module):
         )
 
         # Query projection (model_dim -> n_heads * query_dim)
-        layers = [nn.Linear(args.dim, args.peer_n_heads * args.peer_query_dim)]
+        layers = [CastedLinear(args.dim, args.peer_n_heads * args.peer_query_dim)]
         if args.peer_query_batchnorm:
             # BN is tricky if you have variable padding in the same batch.
             layers.append(nn.BatchNorm1d(args.peer_n_heads * args.peer_query_dim))
@@ -506,7 +506,7 @@ class PEERLayer(nn.Module):
         self.v_emb = nn.Embedding(args.peer_n_experts, args.dim)
 
         # Optional final linear
-        self.output_proj = nn.Linear(args.dim, args.dim)
+        self.output_proj = CastedLinear(args.dim, args.dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
