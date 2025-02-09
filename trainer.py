@@ -114,11 +114,11 @@ class Hyperparameters:
     rank: int = rank
     # PEER
     peer_n_experts = 512 * 512
+    peer_query_dim = 256
     peer_topk = 32
     peer_n_heads = 4
-    peer_query_dim = 256
     peer_activation = F.gelu
-    peer_query_batchnorm = False
+    peer_query_batchnorm = True
     peer_input_dropout = 0.1
     peer_query_dropout = 0.1
     peer_value_dropout = 0.1
