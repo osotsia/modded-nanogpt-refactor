@@ -527,7 +527,9 @@ class PEERLayer(nn.Module):
         # 3) Gather (u_i, v_i) for each selected expert.
         # shapes => [bsz, seq_len, n_heads, k, model_dim]
         u = self.u_emb(indices)
+        u = u.to(x.dtype)
         v = self.v_emb(indices)
+        v = v.to(x.dtype)
 
         # 4) Expert forward => dot = u_i^T x
         # We broadcast x to [bsz, seq_len, n_heads, 1, model_dim], then do an elementwise multiply + sum over model_dim.
