@@ -155,9 +155,9 @@ class Muon(torch.optim.Optimizer):
     Muon - MomentUm Orthogonalized by Newton-Schulz
 
     Muon is an optimization algorithm that extends standard SGD with momentum by applying an
-    orthogonalization post-processing step to the updates. Each 2D parameter's
-    update is replaced with the nearest orthogonal matrix. The orthogonalization is performed
-    using Newton-Schulz iterations, which can be stably run in `bfloat16` on the GPU.
+    orthogonalization post-processing step, where each 2D parameter's update is replaced with
+    the nearest orthogonal matrix. The orthogonalization is performed using Newton-Schulz iterations,
+    which can be stably run in `bfloat16` on the GPU.
 
     Reference:
         https://kellerjordan.github.io/posts/muon/
