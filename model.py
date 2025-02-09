@@ -6,7 +6,6 @@ with open(sys.argv[0]) as f:
 import uuid
 import time
 import copy
-import glob
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -23,6 +22,11 @@ from torch.nn.attention.flex_attention import BlockMask, flex_attention
 
 
 # torch._inductor.config.coordinate_descent_tuning = True # we have banned this flag for new records because it causes compilation to take 30min
+
+
+def next_multiple_of_n(v: float | int, *, n: int):
+    return next(x for x in range(n, int(v) + 1 + n, n) if x >= v)
+
 
 # -----------------------------------------------------------------------------
 # Custom operators: FP8 matmul by @YouJiacheng
@@ -148,14 +152,15 @@ def zeropower_via_newtonschulz5(G: Tensor, steps: int) -> Tensor:
 
 class Muon(torch.optim.Optimizer):
     """
-    Muon - MomentUm Orthogonalized by Newton-schulz
+    Muon - MomentUm Orthogonalized by Newton-Schulz
 
-    https://kellerjordan.github.io/posts/muon/
+    Muon is an optimization algorithm that extends standard SGD with momentum by applying an
+    orthogonalization post-processing step to the updates. Each 2D parameter's
+    update is replaced with the nearest orthogonal matrix. The orthogonalization is performed
+    using Newton-Schulz iterations, which can be stably run in `bfloat16` on the GPU.
 
-    Muon internally runs standard SGD-momentum, and then performs an orthogonalization post-
-    processing step, in which each 2D parameter's update is replaced with the nearest orthogonal
-    matrix. To efficiently orthogonalize each update, we use a Newton-Schulz iteration, which has
-    the advantage that it can be stably run in bfloat16 on the GPU.
+    Reference:
+        https://kellerjordan.github.io/posts/muon/
 
     Some warnings:
     - This optimizer should not be used for the embedding layer, the final fully connected layer,
@@ -202,7 +207,9 @@ class Muon(torch.optim.Optimizer):
                 if base_i + self.rank < len(params):
                     p = params[base_i + self.rank]
                     g = p.grad
-                    assert g is not None
+                    if g is None:
+                        # continue
+                        g = torch.zeros_like(p)  # Force a zero grad
                     state = self.state[p]
                     if "momentum_buffer" not in state:
                         state["momentum_buffer"] = torch.zeros_like(g)
@@ -227,7 +234,26 @@ def norm(x: Tensor):
 
 
 class CastedLinear(nn.Linear):
-    def __init__(self, in_features: int, out_features: int, use_fp8=False, x_s=1.0, w_s=1.0, grad_s=1.0):
+    """
+    A modified linear layer that optionally performs computation in FP8 precision.
+
+    This class extends `torch.nn.Linear` with an optional FP8 computation mode, controlled by `use_fp8`.
+    When FP8 is enabled, the forward pass utilizes a custom matrix multiplication operation (`nanogpt::mm`)
+    that scales inputs, weights, and gradients before performing the computation in FP8 precision.
+
+    Attributes:
+        use_fp8 (bool): If True, enables FP8 computation during training.
+        x_s (float): Scaling factor for input tensor when using FP8.
+        w_s (float): Scaling factor for weights when using FP8.
+        grad_s (float): Scaling factor for gradients when using FP8.
+
+    Note:
+        - The FP8 computation is only used during training.
+        - The custom operation `nanogpt::mm` is used for FP8 matrix multiplication, which handles input scaling
+          and precision conversion to maintain numerical stability.
+    """
+    def __init__(self, in_features: int, out_features: int, use_fp8: bool = False, x_s: float = 1.0, w_s: float = 1.0,
+                 grad_s: float = 1.0):
         super().__init__(in_features, out_features, bias=False)
         self.use_fp8 = use_fp8
         self.x_s = x_s
@@ -312,7 +338,8 @@ class MLP(nn.Module):
         hdim = 4 * dim
         self.c_fc = CastedLinear(dim, hdim)
         self.c_proj = CastedLinear(hdim, dim)
-        self.c_proj.weight.detach().zero_()  # zero init suggested by @Grad62304977
+        # self.c_proj.weight.detach().zero_()  # zero init suggested by @Grad62304977
+        nn.init.zeros_(self.c_proj.weight)
 
     def forward(self, x: Tensor):
         x = self.c_fc(x)
@@ -323,7 +350,7 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, dim: int, num_heads: int, max_seq_len: int, layer_idx: int):
+    def __init__(self, dim: int, num_heads: int, max_seq_len: int, layer_idx: int, args):
         super().__init__()
         # skip attention of blocks.7 (the 8th layer) by @YouJiacheng
         self.attn = CausalSelfAttention(dim, num_heads, max_seq_len) if layer_idx != 7 else None
@@ -341,18 +368,14 @@ class Block(nn.Module):
 # -----------------------------------------------------------------------------
 # The main model
 
-def next_multiple_of_n(v: float | int, *, n: int):
-    return next(x for x in range(n, int(v) + 1 + n, n) if x >= v)
-
-
 class GPT(nn.Module):
-    def __init__(self, vocab_size: int, num_layers: int, num_heads: int, model_dim: int, max_seq_len: int):
+    def __init__(self, vocab_size: int, num_layers: int, num_heads: int, model_dim: int, max_seq_len: int, args):
         super().__init__()
         self.embed = nn.Embedding(vocab_size, model_dim)
         # token value embeddings by @KoszarskyB - inspired by @Grad62304977's value residual implementation following https://arxiv.org/abs/2410.17897
         # value embedding code simplification inspired by @ragulpr https://github.com/KellerJordan/modded-nanogpt/pull/78
         self.value_embeds = nn.ModuleList([nn.Embedding(vocab_size, model_dim) for _ in range(3)])
-        self.blocks = nn.ModuleList([Block(model_dim, num_heads, max_seq_len, i) for i in range(num_layers)])
+        self.blocks = nn.ModuleList([Block(model_dim, num_heads, max_seq_len, i, args) for i in range(num_layers)])
         # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency.
         # suggested to me by @Grad62304977. this originates from Karpathy's experiments.
         self.lm_head = CastedLinear(model_dim, next_multiple_of_n(vocab_size, n=128), use_fp8=True, x_s=0.5,
@@ -404,34 +427,52 @@ class GPT(nn.Module):
         # Long-short SWA block masks by @leloykun & @YouJiacheng, adapated from suggestion by @Grad62304977, following Gemma 2 paper
         return build_bm(sliding_window_num_blocks), build_bm(sliding_window_num_blocks // 2)
 
-    def forward(self, input_seq: Tensor, target_seq: Tensor, sliding_window_num_blocks: Tensor):
-        assert input_seq.ndim == 1
+    def forward(self, input_seq: Tensor, target_seq: Tensor, sliding_window_num_blocks: Tensor) -> Tensor:
+        assert input_seq.ndim == 1, "input_seq must be 1D"
 
-        ve = [value_embed(input_seq) for value_embed in self.value_embeds]
-        # 012 ... 012 structure on token value embeddings by @YouJiacheng, improved on @leloykun's U-net structure
-        ve = [ve[0], ve[1], ve[2]] + [None] * (len(self.blocks) - 6) + [ve[0], ve[1], ve[2]]
-        assert len(ve) == len(self.blocks)
+        value_embeddings = [embed(input_seq) for embed in self.value_embeds]
+        # Pattern: 0,1,2 + None blocks + 0,1,2. Credit @YouJiacheng, improved on @leloykun's U-net structure
+        value_embeddings = (
+                [value_embeddings[0], value_embeddings[1], value_embeddings[2]]
+                + [None] * (len(self.blocks) - 6)
+                + [value_embeddings[0], value_embeddings[1], value_embeddings[2]]
+        )
+        assert len(value_embeddings) == len(self.blocks)
 
+        # Create block masks
         long_bm, short_bm = self.create_blockmasks(input_seq, sliding_window_num_blocks)
-        block_masks = [long_bm, short_bm, short_bm, short_bm, long_bm, short_bm, short_bm, long_bm, short_bm, short_bm,
-                       short_bm, long_bm]
+        block_masks = [
+            long_bm, short_bm, short_bm, short_bm, long_bm, short_bm,
+            short_bm, long_bm, short_bm, short_bm, short_bm, long_bm
+        ]
         assert len(block_masks) == len(self.blocks)
 
-        x = x0 = norm(self.embed(input_seq)[None])  # use of norm here by @Grad62304977
+        # Initial embedding + normalization
+        x0 = norm(self.embed(input_seq)[None])  # use of norm here by @Grad62304977
+        x = x0
 
-        # U-net design by @brendanh0gan
+        # U-Net style skip connections: down -> up path
         skip_connections = []
-        n = len(self.skip_weights)
-        for i in range(len(self.blocks)):
-            if i >= n:
-                x = x + self.skip_weights[i - n] * skip_connections.pop()
-            x = self.blocks[i](x, ve[i], x0, block_masks[i])
-            if i < n:
-                skip_connections.append(x)
+        num_skip = len(self.skip_weights)
+
+        # "Down" pass: gather skip connections
+        for i in range(num_skip):
+            x = self.blocks[i](x, value_embeddings[i], x0, block_masks[i])
+            skip_connections.append(x)
+
+        # "Up" pass: retrieve and apply skip connections
+        for i in range(num_skip, len(self.blocks)):
+            x = x + self.skip_weights[i - num_skip] * skip_connections.pop()
+            x = self.blocks[i](x, value_embeddings[i], x0, block_masks[i])
 
         x = norm(x)
         logits = self.lm_head(x)
-        # @Grad62304977 added tanh softcapping following Gemma 2 paper, @KoszarskyB reduced it from 30 to 15, @YouJiacheng shifted it by +15 (2*sigmoid(2*x)=tanh(x)+1)
+
+        # @Grad62304977 added tanh softcapping following Gemma 2 paper,
+        # @KoszarskyB reduced it from 30 to 15,
+        # @YouJiacheng shifted it by +15 (2*sigmoid(2*x)=tanh(x)+1)
         logits = 30 * torch.sigmoid(logits.float() / 7.5)
+
+        # Cross-entropy loss
         loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target_seq)
         return loss
