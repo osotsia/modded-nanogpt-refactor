@@ -113,8 +113,8 @@ class Hyperparameters:
     world_size: int = world_size
     rank: int = rank
     # PEER
-    peer_n_experts = 100
-    peer_topk = 2
+    peer_n_experts = 400
+    peer_topk = 32
     peer_n_heads = 4
     peer_query_dim = 8
     peer_activation = F.gelu
