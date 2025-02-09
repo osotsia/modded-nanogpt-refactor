@@ -428,6 +428,7 @@ class ProductKeyRouter(nn.Module):
         def product_key_topk(q1_, q2_, head_idx):
             # subkeys shape: [2, side, sub_dim]
             subkeys = self.keys[head_idx]
+            subkeys = subkeys.to(q1_.dtype)  # ensure same dtype as q1_ / q2_
             # Scores for subkey1: (q1_ -> [batch', sub_dim]) x [side, sub_dim]^T -> [batch', side]
             scores1 = torch.matmul(q1_, subkeys[0].transpose(0, 1))  # [batch', side]
             scores2 = torch.matmul(q2_, subkeys[1].transpose(0, 1))  # [batch', side]
