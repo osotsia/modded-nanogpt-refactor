@@ -3,12 +3,7 @@ import sys
 
 with open(sys.argv[0]) as f:
     code = f.read()  # read the code of this file ASAP, for logging
-import uuid
-import time
-import copy
-from dataclasses import dataclass
-from functools import lru_cache
-from pathlib import Path
+
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
@@ -349,12 +344,220 @@ class MLP(nn.Module):
         return x
 
 
+class ProductKeyRouter(nn.Module):
+    """
+    Routes each input token to a small subset of experts using product-key retrieval.
+    Optionally applies dropout or batchnorm to the projected query.
+    """
+    def __init__(
+        self,
+        args
+    ):
+        super().__init__()
+        self.model_dim = args.dim
+        self.query_dim = args.peer_query_dim
+        self.n_experts = args.peer_n_experts
+        self.k = args.peer_topk
+        self.n_heads = args.peer_n_heads
+
+        # Each side = sqrt(n_experts)
+        self.side = int(args.peer_n_experts**0.5)
+        assert self.side * self.side == args.peer_n_expert, "n_experts must be a perfect square."
+        assert args.peer_query_dim % 2 == 0, "query_dim must be even for product-key routing."
+        self.sub_dim = args.peer_query_dim // 2
+
+        # Router config
+        self.query_batchnorm = args.peer_query_batchnorm
+        self.input_dropout = args.peer_input_dropout
+        self.query_dropout = args.peer_query_dropout
+
+        # Sub-keys: [n_heads, 2, side, sub_dim]
+        self.keys = nn.Parameter(
+            torch.randn(args.peer_n_heads, 2, self.side, self.sub_dim) * (1.0 / (self.sub_dim**0.5))
+        )
+
+        # Query projection (model_dim -> n_heads * query_dim)
+        layers = [nn.Linear(args.dim, args.peer_n_heads * args.peer_query_dim)]
+        if args.peer_query_batchnorm:
+            # BN is tricky if you have variable padding in the same batch.
+            layers.append(nn.BatchNorm1d(args.peer_n_heads * args.peer_query_dim))
+        self.query_proj = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor):
+        """
+        x: [batch_size, seq_len, model_dim]
+        Returns:
+          indices: [batch_size, seq_len, n_heads, k]  (top expert IDs)
+          scores:  [batch_size, seq_len, n_heads, k]  (unnormalized gating scores)
+        """
+        bsz, seq_len, _ = x.size()
+
+        # Optional dropout on input
+        if self.input_dropout > 0.0:
+            x = F.dropout(x, p=self.input_dropout, training=self.training)
+
+        # Query projection
+        # queries: [bsz, seq_len, n_heads * query_dim]
+        queries = self.query_proj(x)
+        if self.query_batchnorm:
+            # If using BatchNorm1d, it expects shape [N, C], so we flatten temporal dims.
+            # The forward method in BN needs [batch, features].
+            # We'll do an extra reshape: [bsz*seq_len, n_heads*query_dim], then reshape back.
+            pass  # The above sequential should handle it, but be mindful of shape if you separate the BN layer.
+
+        # Reshape to [bsz, seq_len, n_heads, query_dim]
+        queries = queries.view(bsz, seq_len, self.n_heads, self.query_dim)
+
+        # Optional dropout on queries
+        if self.query_dropout > 0.0:
+            queries = F.dropout(queries, p=self.query_dropout, training=self.training)
+
+        # Split each query into two sub-queries
+        q1, q2 = queries.split(self.sub_dim, dim=-1)  # each: [bsz, seq_len, n_heads, sub_dim]
+
+        # Flatten for matmul => shape [bsz*seq_len*n_heads, sub_dim]
+        q1_flat = q1.view(-1, self.sub_dim)
+        q2_flat = q2.view(-1, self.sub_dim)
+
+        # keys: [n_heads, 2, side, sub_dim]
+        # We'll do a separate top-k for each head, so we chunk the keys along dim=0 and loop or do a batched approach:
+        # For simpler code: gather them all at once, then index by head.
+        # shape after gather: [head, subkeys, side, sub_dim]
+
+        # We'll define a small helper to do the top-k for one head's subkeys:
+        def product_key_topk(q1_, q2_, head_idx):
+            # subkeys shape: [2, side, sub_dim]
+            subkeys = self.keys[head_idx]
+            # Scores for subkey1: (q1_ -> [batch', sub_dim]) x [side, sub_dim]^T -> [batch', side]
+            scores1 = torch.matmul(q1_, subkeys[0].transpose(0, 1))  # [batch', side]
+            scores2 = torch.matmul(q2_, subkeys[1].transpose(0, 1))  # [batch', side]
+
+            # top-k from each side => [batch', k], [batch', k]
+            topk1, idx1 = torch.topk(scores1, self.k, dim=-1)
+            topk2, idx2 = torch.topk(scores2, self.k, dim=-1)
+
+            # Combine => k^2 candidates
+            # topk1_expanded: [batch', k, 1], topk2_expanded: [batch', 1, k]
+            topk1_expanded = topk1.unsqueeze(2)
+            topk2_expanded = topk2.unsqueeze(1)
+            combined = topk1_expanded + topk2_expanded  # [batch', k, k]
+            combined_flat = combined.view(-1, self.k * self.k)
+
+            # final topk => [batch', k]
+            final_vals, final_idx = torch.topk(combined_flat, self.k, dim=-1)
+
+            # get actual side indices
+            subidx1 = final_idx // self.k
+            subidx2 = final_idx % self.k
+            actual_idx1 = idx1.gather(1, subidx1)
+            actual_idx2 = idx2.gather(1, subidx2)
+
+            # unify into single expert ID => id = idx1 * side + idx2
+            expert_id = actual_idx1 * self.side + actual_idx2  # [batch', k]
+
+            return final_vals, expert_id
+
+        # We'll loop over heads. Another approach is to chunk q1_flat, q2_flat by head range.
+        # shape of q1_flat: [bsz*seq_len*n_heads, sub_dim]
+        # total 'batch'' = bsz*seq_len per head, so we just reshape.
+        chunk_size = bsz * seq_len
+        all_scores = []
+        all_indices = []
+        for h in range(self.n_heads):
+            start = h * chunk_size
+            end = (h + 1) * chunk_size
+            vals_h, idx_h = product_key_topk(q1_flat[start:end], q2_flat[start:end], h)
+            all_scores.append(vals_h)
+            all_indices.append(idx_h)
+
+        # Merge results => shape [bsz*seq_len, n_heads, k]
+        scores_merged = torch.stack(all_scores, dim=1)
+        idx_merged = torch.stack(all_indices, dim=1)
+
+        # Reshape to final: [bsz, seq_len, n_heads, k]
+        scores_merged = scores_merged.view(bsz, seq_len, self.n_heads, self.k)
+        idx_merged = idx_merged.view(bsz, seq_len, self.n_heads, self.k)
+
+        return idx_merged, scores_merged
+
+
+class PEERLayer(nn.Module):
+    """
+    A PEER layer storing a massive set of single-neuron experts.
+    Each expert: e_i(x) = activation(u_i^T x) * v_i.
+    """
+    def __init__(
+        self,
+        args
+    ):
+        super().__init__()
+        self.model_dim = args.dim
+        self.n_experts = args.peer_n_experts
+        self.k = args.peer_topk
+        self.n_heads = args.peer_n_heads
+        self.activation = args.peer_activation
+        self.value_dropout = args.peer_value_dropout
+
+        # Router
+        self.router = ProductKeyRouter(args)
+
+        # Each expert is (u_i, v_i). We'll store them in embeddings [n_experts, model_dim].
+        self.u_emb = nn.Embedding(args.peer_n_experts, args.dim)
+        self.v_emb = nn.Embedding(args.peer_n_experts, args.dim)
+
+        # Optional final linear
+        self.output_proj = nn.Linear(args.dim, args.dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        x: [batch_size, seq_len, model_dim]
+        Returns:
+          [batch_size, seq_len, model_dim]
+        """
+        bsz, seq_len, _ = x.size()
+
+        # 1) Retrieve top-k experts via product-key router
+        indices, scores = self.router(x)  # [bsz, seq_len, n_heads, k], same shape for scores
+
+        # 2) Convert scores to gating probabilities. If you prefer a different gating (e.g. sigmoid),
+        #    you can adapt here. Softmax along the k dimension:
+        gate = F.softmax(scores, dim=-1)
+
+        # 3) Gather (u_i, v_i) for each selected expert.
+        # shapes => [bsz, seq_len, n_heads, k, model_dim]
+        u = self.u_emb(indices)
+        v = self.v_emb(indices)
+
+        # 4) Expert forward => dot = u_i^T x
+        # We broadcast x to [bsz, seq_len, n_heads, 1, model_dim], then do an elementwise multiply + sum over model_dim.
+        x_expanded = x.unsqueeze(2).unsqueeze(3)  # shape [bsz, seq_len, n_heads, 1, model_dim]
+        dot = (x_expanded * u).sum(dim=-1)        # shape [bsz, seq_len, n_heads, k]
+        dot_activated = self.activation(dot)
+
+        # 5) Multiply by v_i => shape [bsz, seq_len, n_heads, k, model_dim]
+        expert_output = dot_activated.unsqueeze(-1) * v
+
+        # Optional dropout on the “value” side, similar to PKM's value_dropout
+        if self.value_dropout > 0.0:
+            expert_output = F.dropout(expert_output, p=self.value_dropout, training=self.training)
+
+        # 6) Weighted sum => sum_{k} gate_{k} * expert_output_{k}
+        combined = (expert_output * gate.unsqueeze(-1)).sum(dim=3)  # [bsz, seq_len, n_heads, model_dim]
+
+        # 7) Sum over heads => [bsz, seq_len, model_dim]
+        combined = combined.sum(dim=2)
+
+        # 8) Optional final projection
+        out = self.output_proj(combined)
+        return out
+
+
 class Block(nn.Module):
     def __init__(self, dim: int, num_heads: int, max_seq_len: int, layer_idx: int, args):
         super().__init__()
         # skip attention of blocks.7 (the 8th layer) by @YouJiacheng
         self.attn = CausalSelfAttention(dim, num_heads, max_seq_len) if layer_idx != 7 else None
-        self.mlp = MLP(dim)
+        self.mlp = MLP(dim) if layer_idx != 3 else PEERLayer(args)
         self.lambdas = nn.Parameter(torch.tensor([1., 0.]))
 
     def forward(self, x: Tensor, ve: Tensor | None, x0: Tensor, block_mask: BlockMask):

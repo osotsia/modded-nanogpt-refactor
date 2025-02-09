@@ -16,7 +16,7 @@ import torch
 
 torch.empty(1, device="cuda", requires_grad=True).backward()  # prevents a bug on some systems
 from torch import Tensor, nn
-# import torch.nn.functional as F
+import torch.nn.functional as F
 import torch.distributed as dist
 # use of FlexAttention contributed by @KoszarskyB
 # from torch.nn.attention.flex_attention import BlockMask, flex_attention
@@ -104,6 +104,7 @@ class Hyperparameters:
     # evaluation and logging
     val_loss_every = 125  # every how many steps to evaluate val loss? 0 for only at the end
     val_batch_size: int = world_size * 4 * 64 * 1024
+    train_batch_size: int = world_size * 48 * 1024
     # implementation
     train_seq_len = 48 * 1024  # FlexAttention sequence length
     val_seq_len = 4 * 64 * 1024  # FlexAttention sequence length for validation
@@ -111,10 +112,17 @@ class Hyperparameters:
     # dist
     world_size: int = world_size
     rank: int = rank
-    # bs warmup
-    bs_warmup_steps: int = 20
-    initial_batch_size: int = 1024
-    train_batch_size: int = world_size * 48 * 1024
+    # PEER
+    peer_n_experts = 16,
+    peer_topk = 2,
+    peer_n_heads = 4,
+    peer_query_dim = 8,
+    peer_activation = F.gelu,
+    peer_query_batchnorm = False,
+    peer_input_dropout = 0.1,
+    peer_query_dropout = 0.1,
+    peer_value_dropout = 0.1
+
 
 
 args = Hyperparameters()
