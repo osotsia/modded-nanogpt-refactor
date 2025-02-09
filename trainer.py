@@ -58,26 +58,52 @@ def distributed_data_generator(filename_pattern: str, batch_size: int, rank : in
         pos += batch_size
         yield inputs, targets
 
+
+
+class DistributedDataLoader:
+    def __init__(self, filename_pattern: str, batch_size: int, rank: int, world_size: int):
+        self.files = sorted(Path.cwd().glob(filename_pattern))
+        assert batch_size % world_size == 0, "Batch size must be divisible by world size"
+
+        self.batch_size = batch_size
+        self.local_batch_size = batch_size // world_size
+        self.rank = rank
+        self.world_size = world_size
+
+        self.file_iter = iter(self.files)  # Replace with itertools.cycle(self.files) for multi-epoch training
+        self.tokens, self.pos = self._load_data_shard(next(self.file_iter)), 0
+
+    @staticmethod
+    def _load_data_shard(file: Path):
+        header = torch.from_file(f"{file}", False, 256, dtype=torch.int32)  # header is 256 int32
+        assert header[0] == 20240520, "Magic number mismatch in the data .bin file"
+        assert header[1] == 1, "Unsupported version"
+
+        num_tokens = int(header[2])  # Number of tokens (claimed)
+        with file.open("rb", buffering=0) as f:
+            tokens = torch.empty(num_tokens, dtype=torch.uint16, pin_memory=True)  # Avoid pin_memory copy
+            f.seek(256 * 4)
+            nbytes = f.readinto(tokens.numpy())  # Avoid bytes->array copy
+            assert nbytes == 2 * num_tokens, "Number of tokens read does not match header"
+        return tokens
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.pos + self.batch_size + 1 >= len(self.tokens):
+            self.tokens, self.pos = self._load_data_shard(next(self.file_iter)), 0
+
+        buf = self.tokens[self.pos + self.rank * self.local_batch_size:][:self.local_batch_size + 1]
+        inputs = buf[:-1].to(device="cuda", dtype=torch.int32, non_blocking=True)
+        targets = buf[1:].to(device="cuda", dtype=torch.int64, non_blocking=True)
+
+        self.pos += self.batch_size
+        return inputs, targets
+
 # -----------------------------------------------------------------------------
 # int main
 
-@dataclass
-class Hyperparameters:
-    # data
-    train_files = "data/fineweb10B/fineweb_train_*.bin" # input .bin to train on
-    val_files = "data/fineweb10B/fineweb_val_*.bin" # input .bin to eval validation loss on
-    val_tokens = 10485760 # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
-    train_seq_len = 48*1024 # FlexAttention sequence length
-    val_seq_len = 4*64*1024 # FlexAttention sequence length for validation
-    # optimization
-    num_iterations = 1770 # number of iterations to run
-    cooldown_frac = 0.4 # fraction of training spent cooling down the learning rate
-    # architecture
-    vocab_size = 50257
-    # evaluation and logging
-    val_loss_every = 125 # every how many steps to evaluate val loss? 0 for only at the end
-    save_checkpoint = False
-args = Hyperparameters()
 
 # torchrun sets these env variables
 rank = int(os.environ["RANK"])
@@ -89,6 +115,29 @@ torch.cuda.set_device(device)
 dist.init_process_group(backend="nccl", device_id=device)
 dist.barrier()
 master_process = (rank == 0) # this process will do logging, checkpointing etc.
+
+
+@dataclass
+class Hyperparameters:
+    # data
+    train_files = "data/fineweb10B/fineweb_train_*.bin"  # input .bin to train on
+    val_files = "data/fineweb10B/fineweb_val_*.bin"  # input .bin to eval validation loss on
+    val_tokens = 10485760  # how many tokens of validation data? it's important to keep this fixed for consistent comparisons
+    train_seq_len = 48 * 1024  # FlexAttention sequence length
+    val_seq_len = 4 * 64 * 1024  # FlexAttention sequence length for validation
+    # optimization
+    num_iterations = 1770  # number of iterations to run
+    cooldown_frac = 0.4  # fraction of training spent cooling down the learning rate
+    # architecture
+    vocab_size = 50257
+    # evaluation and logging
+    val_loss_every = 125  # every how many steps to evaluate val loss? 0 for only at the end
+    save_checkpoint = False
+    train_batch_size: int = world_size * 48 * 1024
+    val_batch_size: int = world_size * 4 * 64 * 1024
+
+
+args = Hyperparameters()
 
 # begin logging
 logfile = None
@@ -194,7 +243,14 @@ del initial_state
 #        Training and validation       #
 ########################################
 
-train_loader = distributed_data_generator(args.train_files, world_size * args.train_seq_len, rank, world_size)
+#train_loader = distributed_data_generator(args.train_files, world_size * args.train_seq_len, rank, world_size)
+train_loader = DistributedDataLoader(
+    filename_pattern=args.train_files,
+    batch_size=args.train_batch_size,
+    rank=rank,
+    world_size=world_size
+)
+
 training_time_ms = 0
 # start the clock
 torch.cuda.synchronize()
@@ -213,7 +269,13 @@ for step in range(train_steps + 1):
         val_batch_size = world_size * args.val_seq_len
         assert args.val_tokens % val_batch_size == 0
         val_steps = args.val_tokens // val_batch_size
-        val_loader = distributed_data_generator(args.val_files, val_batch_size, rank, world_size)
+        #val_loader = distributed_data_generator(args.val_files, val_batch_size, rank, world_size)
+        val_loader = DistributedDataLoader(
+            filename_pattern=args.val_files,
+            batch_size=args.val_batch_size,
+            rank=rank,
+            world_size=world_size
+        )
         val_loss = 0
         with torch.no_grad():
             for _ in range(val_steps):
