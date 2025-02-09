@@ -119,9 +119,9 @@ class Hyperparameters:
     peer_n_heads = 4
     peer_activation = F.gelu
     peer_query_batchnorm = True
-    peer_input_dropout = 0.1
-    peer_query_dropout = 0.1
-    peer_value_dropout = 0.1
+    peer_input_dropout = 0.0
+    peer_query_dropout = 0.0
+    peer_value_dropout = 0.0
 
 
 
