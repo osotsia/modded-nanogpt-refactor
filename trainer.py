@@ -112,16 +112,6 @@ class Hyperparameters:
     # dist
     world_size: int = world_size
     rank: int = rank
-    # PEER
-    peer_n_experts = 612 * 612
-    peer_query_dim = 128
-    peer_topk = 32
-    peer_n_heads = 4
-    peer_activation = F.gelu
-    peer_query_batchnorm = False
-    peer_input_dropout = 0.0
-    peer_query_dropout = 0.0
-    peer_value_dropout = 0.0
 
 
 
