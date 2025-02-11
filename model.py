@@ -363,7 +363,7 @@ class Block(nn.Module):
 
 class HybridBlock(nn.Module):
     """
-    A single block that can be 'SSM', 'ATTN', or 'MLP'.
+    A single block that can be 'SSM' or 'ATTN'.
     """
     def __init__(
         self,
@@ -378,7 +378,6 @@ class HybridBlock(nn.Module):
     ):
         super().__init__()
         self.block_type = block_type
-        self.norm = nn.LayerNorm(dim)
 
         # Weighted skip connection
         self.lambdas = nn.Parameter(torch.tensor([1.0, 0.0]))  # [lambda_self, lambda_x0]
@@ -388,10 +387,10 @@ class HybridBlock(nn.Module):
             self.module = CausalSelfAttention(dim, num_heads, max_seq_len)
         elif block_type == "SSM":
             self.module = Mamba2(d_model=dim, d_state=d_state, d_conv=d_conv, expand=expand)
-        elif block_type == "MLP":
-            self.module = MLP(dim)
         else:
             raise ValueError(f"Unknown block_type: {block_type}")
+
+        self.mlp = MLP(dim)
 
     def forward(
         self,
@@ -404,10 +403,11 @@ class HybridBlock(nn.Module):
         x = self.lambdas[0] * x + self.lambdas[1] * x0
 
         if self.block_type == "ATTN":
-            x = x + self.module(self.norm(x), ve, block_mask)
-        else:
-            x = x + self.module(self.norm(x))
+            x = x + self.module(norm(x), ve, block_mask)
+        if self.block_type == "SSM":
+            x = x + self.module(norm(x))
 
+        x = x + self.mlp(norm(x))
         return x
 
 
@@ -424,10 +424,8 @@ class GPT(nn.Module):
         # value embedding code simplification inspired by @ragulpr https://github.com/KellerJordan/modded-nanogpt/pull/78
         self.value_embeds = nn.ModuleList([nn.Embedding(vocab_size, model_dim) for _ in range(3)])
         # self.blocks = nn.ModuleList([Block(model_dim, num_heads, max_seq_len, i, args) for i in range(num_layers)])
-        LAYER_ORDER = [
-            "SSM", "MLP", "SSM", "MLP", "ATTN", "MLP",
-            "SSM", "MLP", "SSM", "MLP", "MLP", "SSM",
-        ]
+
+        LAYER_ORDER = ["SSM" if layer_idx != 5 else "ATTN" for layer_idx in range(num_layers)]
 
         self.blocks = nn.ModuleList([
             HybridBlock(
@@ -441,6 +439,7 @@ class GPT(nn.Module):
             )
             for bt in LAYER_ORDER
         ])
+        
         # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency.
         # suggested to me by @Grad62304977. this originates from Karpathy's experiments.
         self.lm_head = CastedLinear(model_dim, next_multiple_of_n(vocab_size, n=128), use_fp8=True, x_s=0.5,
