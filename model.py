@@ -363,7 +363,7 @@ class Block(nn.Module):
 
 class HybridBlock(nn.Module):
     """
-    A single block that can be 'SSM' or 'ATTN'.
+    A single block that can be 'SSM+MLP' or 'ATTN+MLP'.
     """
     def __init__(
         self,
@@ -399,7 +399,7 @@ class HybridBlock(nn.Module):
         x0: torch.Tensor,
         block_mask: Optional[torch.Tensor]
     ):
-        # Weighted skip from x and x0
+        # Weighted skip
         x = self.lambdas[0] * x + self.lambdas[1] * x0
 
         if self.block_type == "ATTN":
