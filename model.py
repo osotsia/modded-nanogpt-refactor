@@ -4,7 +4,6 @@ import sys
 with open(sys.argv[0]) as f:
     code = f.read()  # read the code of this file ASAP, for logging
 
-
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 import torch
 
@@ -16,6 +15,7 @@ import torch.distributed as dist
 from torch.nn.attention.flex_attention import BlockMask, flex_attention
 from mamba_ssm import Mamba2
 from typing import Optional
+
 
 # torch._inductor.config.coordinate_descent_tuning = True # we have banned this flag for new records because it causes compilation to take 30min
 
@@ -248,6 +248,7 @@ class CastedLinear(nn.Linear):
         - The custom operation `nanogpt::mm` is used for FP8 matrix multiplication, which handles input scaling
           and precision conversion to maintain numerical stability.
     """
+
     def __init__(self, in_features: int, out_features: int, use_fp8: bool = False, x_s: float = 1.0, w_s: float = 1.0,
                  grad_s: float = 1.0):
         super().__init__(in_features, out_features, bias=False)
@@ -365,22 +366,14 @@ class HybridBlock(nn.Module):
     """
     A single block that can be 'SSM+MLP' or 'ATTN+MLP'.
     """
-    def __init__(
-        self,
-        block_type: str,
-        dim: int,
-        num_heads: int,
-        max_seq_len: int,
-        # Extra SSM parameters:
-        d_state: int ,
-        d_conv: int,
-        expand: int,
-    ):
+
+    def __init__(self, block_type: str, dim: int, num_heads: int, max_seq_len: int,
+                 d_state: int, d_conv: int, expand: int, ):
         super().__init__()
         self.block_type = block_type
 
         # Weighted skip connection
-        self.lambdas = nn.Parameter(torch.tensor([1.0, 0.0]))  # [lambda_self, lambda_x0]
+        self.lambdas = nn.Parameter(torch.tensor([1.0, 0.0]))
 
         # Decide which core module to use
         if block_type == "ATTN":
@@ -392,13 +385,8 @@ class HybridBlock(nn.Module):
 
         self.mlp = MLP(dim)
 
-    def forward(
-        self,
-        x: torch.Tensor,
-        ve: Optional[torch.Tensor],
-        x0: torch.Tensor,
-        block_mask: Optional[torch.Tensor]
-    ):
+    def forward(self, x: torch.Tensor, ve: Optional[torch.Tensor], x0: torch.Tensor,
+                block_mask: Optional[torch.Tensor]):
         # Weighted skip
         x = self.lambdas[0] * x + self.lambdas[1] * x0
 
@@ -409,8 +397,6 @@ class HybridBlock(nn.Module):
 
         x = x + self.mlp(norm(x))
         return x
-
-
 
 
 # -----------------------------------------------------------------------------
@@ -438,7 +424,7 @@ class GPT(nn.Module):
             )
             for bt in LAYER_ORDER
         ])
-        
+
         # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency.
         # suggested to me by @Grad62304977. this originates from Karpathy's experiments.
         self.lm_head = CastedLinear(model_dim, next_multiple_of_n(vocab_size, n=128), use_fp8=True, x_s=0.5,
