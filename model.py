@@ -426,7 +426,6 @@ class GPT(nn.Module):
         # self.blocks = nn.ModuleList([Block(model_dim, num_heads, max_seq_len, i, args) for i in range(num_layers)])
 
         LAYER_ORDER = ["SSM" if layer_idx != 5 else "ATTN" for layer_idx in range(num_layers)]
-
         self.blocks = nn.ModuleList([
             HybridBlock(
                 block_type=bt,
