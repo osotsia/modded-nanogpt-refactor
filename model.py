@@ -230,7 +230,7 @@ def norm_old(x: Tensor):
 
 
 def norm(x: Tensor, layer_idx: int = 1):
-    return F.rms_norm(x, (x.size(-1),)) * 1.0 / (layer_idx ** 0.5)
+    return F.rms_norm(x, (x.size(-1),)) * 1.0 / ((layer_idx+1) ** 0.5)
 
 
 class CastedLinear(nn.Linear):
