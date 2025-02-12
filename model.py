@@ -225,8 +225,12 @@ class Muon(torch.optim.Optimizer):
 # -----------------------------------------------------------------------------
 # PyTorch nn.Module definitions for the model
 
-def norm(x: Tensor):
+def norm_old(x: Tensor):
     return F.rms_norm(x, (x.size(-1),))
+
+
+def norm(x: Tensor, layer_idx: int = 1):
+    return F.rms_norm(x, (x.size(-1),)) * 1.0 / (layer_idx ** 0.5)
 
 
 class CastedLinear(nn.Linear):
@@ -311,12 +315,12 @@ class CausalSelfAttention(nn.Module):
         # inspired by learnable scalars used by @brendanh0gan https://x.com/hi_tysam/status/1879693583898591283
         self.attn_scale = 0.12
 
-    def forward(self, x: Tensor, ve: Tensor | None, block_mask: BlockMask):
+    def forward(self, x: Tensor, ve: Tensor | None, block_mask: BlockMask, layer_idx: int):
         B, T = x.size(0), x.size(1)  # batch size, sequence length
         assert B == 1, "Must use batch size = 1 for FlexAttention"
         q, k, v = F.linear(x, self.qkv_w.flatten(end_dim=1).type_as(x)).view(B, T, 3 * self.num_heads,
                                                                              self.head_dim).chunk(3, dim=-2)
-        q, k = norm(q), norm(k)  # QK norm @Grad62304977
+        q, k = norm(q, layer_idx), norm(k, layer_idx)  # QK norm @Grad62304977
         q, k = self.rotary(q), self.rotary(k)
         if ve is not None:
             v = self.lambdas[0] * v + self.lambdas[1] * ve.view_as(v)  # @KoszarskyB & @Grad62304977
@@ -335,7 +339,7 @@ class MLP(nn.Module):
         hdim = int(multiplier * dim)
         self.c_fc = CastedLinear(dim, hdim)
         self.c_proj = CastedLinear(hdim, dim)
-        nn.init.zeros_(self.c_proj.weight) # zero init suggested by @Grad62304977
+        nn.init.zeros_(self.c_proj.weight)  # zero init suggested by @Grad62304977
 
     def forward(self, x: Tensor):
         x = self.c_fc(x)
@@ -352,12 +356,13 @@ class Block(nn.Module):
         self.attn = CausalSelfAttention(dim, num_heads, max_seq_len) if layer_idx != 7 else None
         self.mlp = MLP(dim)
         self.lambdas = nn.Parameter(torch.tensor([1., 0.]))
+        self.layer_idx = layer_idx
 
     def forward(self, x: Tensor, ve: Tensor | None, x0: Tensor, block_mask: BlockMask):
         x = self.lambdas[0] * x + self.lambdas[1] * x0
         if self.attn is not None:
-            x = x + self.attn(norm(x), ve, block_mask)
-        x = x + self.mlp(norm(x))
+            x = x + self.attn(norm(x, self.layer_idx), ve, block_mask, self.layer_idx)
+        x = x + self.mlp(norm(x, self.layer_idx))
         return x
 
 
@@ -378,8 +383,8 @@ class HybridBlock(nn.Module):
         if block_type == "ATTN":
             self.module = CausalSelfAttention(dim, num_heads, max_seq_len)
         elif block_type == "SSM":
-
             # self.module = Mamba2(d_model=dim, d_state=d_state, d_conv=d_conv, expand=expand)
+            pass
         else:
             raise ValueError(f"Unknown block_type: {block_type}")
 
@@ -409,8 +414,9 @@ class GPT(nn.Module):
         # token value embeddings by @KoszarskyB - inspired by @Grad62304977's value residual implementation following https://arxiv.org/abs/2410.17897
         # value embedding code simplification inspired by @ragulpr https://github.com/KellerJordan/modded-nanogpt/pull/78
         self.value_embeds = nn.ModuleList([nn.Embedding(vocab_size, model_dim) for _ in range(3)])
-        # self.blocks = nn.ModuleList([Block(model_dim, num_heads, max_seq_len, i, args) for i in range(num_layers)])
 
+        self.blocks = nn.ModuleList([Block(model_dim, num_heads, max_seq_len, i, args) for i in range(num_layers)])
+        '''
         LAYER_ORDER = ["ATTN" if layer_idx != 55 else "SSM" for layer_idx in range(num_layers)]
         self.blocks = nn.ModuleList([
             HybridBlock(
@@ -424,6 +430,7 @@ class GPT(nn.Module):
             )
             for bt in LAYER_ORDER
         ])
+        '''
 
         # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency.
         # suggested to me by @Grad62304977. this originates from Karpathy's experiments.
