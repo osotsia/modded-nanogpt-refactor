@@ -13,7 +13,7 @@ import torch.nn.functional as F
 import torch.distributed as dist
 # use of FlexAttention contributed by @KoszarskyB
 from torch.nn.attention.flex_attention import BlockMask, flex_attention
-from mamba_ssm import Mamba2
+# from mamba_ssm import Mamba2
 from typing import Optional
 
 
@@ -378,7 +378,8 @@ class HybridBlock(nn.Module):
         if block_type == "ATTN":
             self.module = CausalSelfAttention(dim, num_heads, max_seq_len)
         elif block_type == "SSM":
-            self.module = Mamba2(d_model=dim, d_state=d_state, d_conv=d_conv, expand=expand)
+
+            # self.module = Mamba2(d_model=dim, d_state=d_state, d_conv=d_conv, expand=expand)
         else:
             raise ValueError(f"Unknown block_type: {block_type}")
 
@@ -410,7 +411,7 @@ class GPT(nn.Module):
         self.value_embeds = nn.ModuleList([nn.Embedding(vocab_size, model_dim) for _ in range(3)])
         # self.blocks = nn.ModuleList([Block(model_dim, num_heads, max_seq_len, i, args) for i in range(num_layers)])
 
-        LAYER_ORDER = ["ATTN" if layer_idx == 55 else "SSM" for layer_idx in range(num_layers)]
+        LAYER_ORDER = ["ATTN" if layer_idx != 55 else "SSM" for layer_idx in range(num_layers)]
         self.blocks = nn.ModuleList([
             HybridBlock(
                 block_type=bt,
