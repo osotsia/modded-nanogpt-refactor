@@ -410,7 +410,7 @@ class GPT(nn.Module):
         self.value_embeds = nn.ModuleList([nn.Embedding(vocab_size, model_dim) for _ in range(3)])
         # self.blocks = nn.ModuleList([Block(model_dim, num_heads, max_seq_len, i, args) for i in range(num_layers)])
 
-        LAYER_ORDER = ["SSM" if layer_idx != 5 else "ATTN" for layer_idx in range(num_layers)]
+        LAYER_ORDER = ["ATTN" if layer_idx == 55 else "SSM" for layer_idx in range(num_layers)]
         self.blocks = nn.ModuleList([
             HybridBlock(
                 block_type=bt,
