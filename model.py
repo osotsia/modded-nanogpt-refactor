@@ -335,8 +335,7 @@ class MLP(nn.Module):
         hdim = int(multiplier * dim)
         self.c_fc = CastedLinear(dim, hdim)
         self.c_proj = CastedLinear(hdim, dim)
-        # self.c_proj.weight.detach().zero_()  # zero init suggested by @Grad62304977
-        nn.init.zeros_(self.c_proj.weight)
+        nn.init.zeros_(self.c_proj.weight) # zero init suggested by @Grad62304977
 
     def forward(self, x: Tensor):
         x = self.c_fc(x)
