@@ -13,7 +13,6 @@ import torch.nn.functional as F
 import torch.distributed as dist
 # use of FlexAttention contributed by @KoszarskyB
 from torch.nn.attention.flex_attention import BlockMask, flex_attention
-# from mamba_ssm import Mamba2
 from typing import Optional
 
 
@@ -361,44 +360,6 @@ class Block(nn.Module):
         return x
 
 
-class HybridBlock(nn.Module):
-    """
-    A single block that can be 'SSM+MLP' or 'ATTN+MLP'.
-    """
-
-    def __init__(self, block_type: str, dim: int, num_heads: int, max_seq_len: int,
-                 d_state: int, d_conv: int, expand: int, ):
-        super().__init__()
-        self.block_type = block_type
-
-        # Weighted skip connection
-        self.lambdas = nn.Parameter(torch.tensor([1.0, 0.0]))
-
-        # Decide which core module to use
-        if block_type == "ATTN":
-            self.module = CausalSelfAttention(dim, num_heads, max_seq_len)
-        elif block_type == "SSM":
-            # self.module = Mamba2(d_model=dim, d_state=d_state, d_conv=d_conv, expand=expand)
-            pass
-        else:
-            raise ValueError(f"Unknown block_type: {block_type}")
-
-        self.mlp = MLP(dim)
-
-    def forward(self, x: torch.Tensor, ve: Optional[torch.Tensor], x0: torch.Tensor,
-                block_mask: Optional[torch.Tensor]):
-        # Weighted skip
-        x = self.lambdas[0] * x + self.lambdas[1] * x0
-
-        if self.block_type == "ATTN":
-            x = x + self.module(norm(x), ve, block_mask)
-        if self.block_type == "SSM":
-            x = x + self.module(norm(x))
-
-        x = x + self.mlp(norm(x))
-        return x
-
-
 # -----------------------------------------------------------------------------
 # The main model
 
@@ -409,21 +370,8 @@ class GPT(nn.Module):
         # token value embeddings by @KoszarskyB - inspired by @Grad62304977's value residual implementation following https://arxiv.org/abs/2410.17897
         # value embedding code simplification inspired by @ragulpr https://github.com/KellerJordan/modded-nanogpt/pull/78
         self.value_embeds = nn.ModuleList([nn.Embedding(vocab_size, model_dim) for _ in range(3)])
-        # self.blocks = nn.ModuleList([Block(model_dim, num_heads, max_seq_len, i, args) for i in range(num_layers)])
-
-        LAYER_ORDER = ["ATTN" if layer_idx != 55 else "SSM" for layer_idx in range(num_layers)]
-        self.blocks = nn.ModuleList([
-            HybridBlock(
-                block_type=bt,
-                dim=model_dim,
-                num_heads=num_heads,
-                max_seq_len=max_seq_len,
-                d_state=16,
-                d_conv=4,
-                expand=2,
-            )
-            for bt in LAYER_ORDER
-        ])
+        
+        self.blocks = nn.ModuleList([Block(model_dim, num_heads, max_seq_len, i, args) for i in range(num_layers)])
 
         # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency.
         # suggested to me by @Grad62304977. this originates from Karpathy's experiments.
@@ -476,7 +424,7 @@ class GPT(nn.Module):
         # Long-short SWA block masks by @leloykun & @YouJiacheng, adapated from suggestion by @Grad62304977, following Gemma 2 paper
         return build_bm(sliding_window_num_blocks), build_bm(sliding_window_num_blocks // 2)
 
-    def forward(self, input_seq: Tensor, target_seq: Tensor, sliding_window_num_blocks: Tensor) -> Tensor:
+    def forward(self, input_seq: Tensor, target_seq: Tensor, sliding_window_num_blocks: Tensor, n_passes: int = 1) -> Tensor:
         assert input_seq.ndim == 1, "input_seq must be 1D"
 
         value_embeddings = [embed(input_seq) for embed in self.value_embeds]
@@ -504,18 +452,18 @@ class GPT(nn.Module):
         skip_connections = []
         num_skip = len(self.skip_weights)
 
-        # "Down" pass: gather skip connections
-        for i in range(num_skip):
-            x = self.blocks[i](x, value_embeddings[i], x0, block_masks[i])
-            skip_connections.append(x)
+        for _ in range(n_passes):  # for multiple passes over the layers
+            # "Down" pass: gather skip connections
+            for i in range(num_skip):
+                x = self.blocks[i](x, value_embeddings[i], x0, block_masks[i])
+                skip_connections.append(x)
 
-        # "Up" pass: retrieve and apply skip connections
-        for i in range(num_skip, len(self.blocks)):
-            x = x + self.skip_weights[i - num_skip] * skip_connections.pop()
-            x = self.blocks[i](x, value_embeddings[i], x0, block_masks[i])
+            # "Up" pass: retrieve and apply skip connections
+            for i in range(num_skip, len(self.blocks)):
+                x = x + self.skip_weights[i - num_skip] * skip_connections.pop()
+                x = self.blocks[i](x, value_embeddings[i], x0, block_masks[i])
 
-        x = norm(x)
-        logits = self.lm_head(x)
+        logits = self.lm_head(norm(x))
 
         # @Grad62304977 added tanh softcapping following Gemma 2 paper,
         # @KoszarskyB reduced it from 30 to 15,
