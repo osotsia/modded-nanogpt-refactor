@@ -322,9 +322,8 @@ def train_loop(model, train_loader, optimizers, optimizer2, args,
 
         # --------------- TRAINING SECTION -----------------
         inputs, targets = next(train_loader)
-        # inputs, targets = train_loader.get_batch(batch_size=get_warmup_batch_size(step))
 
-        n_passes = 2 if step % 4 == 0 else 1
+        n_passes = 2 if step % 2 == 0 else 1
 
         train_loss = model(inputs, targets, get_window_size_blocks(step), n_passes=n_passes)
         train_loss.backward()
