@@ -352,8 +352,18 @@ class Block(nn.Module):
         self.mlp = MLP(dim)
         self.lambdas = nn.Parameter(torch.tensor([1., 0.]))
 
-    def forward(self, x: Tensor, ve: Tensor | None, x0: Tensor, block_mask: BlockMask):
+        # Let block see pass index
+        self.pass_embed = nn.Embedding(8, dim)  # 8 is arbitrary max num of passes
+        self.pass_linear = nn.Linear(dim, dim)
+
+    def forward(self, x: Tensor, ve: Tensor | None, x0: Tensor, block_mask: BlockMask, pass_idx: int = 0):
         x = self.lambdas[0] * x + self.lambdas[1] * x0
+
+        # Add pass embedding
+        pass_emb = self.pass_embed(torch.tensor([pass_idx], device=x.device))
+        pass_emb = self.pass_linear(pass_emb).unsqueeze(0)  # shape [1, 1, dim]
+        x = x + pass_emb
+
         if self.attn is not None:
             x = x + self.attn(norm(x), ve, block_mask)
         x = x + self.mlp(norm(x))
@@ -370,7 +380,7 @@ class GPT(nn.Module):
         # token value embeddings by @KoszarskyB - inspired by @Grad62304977's value residual implementation following https://arxiv.org/abs/2410.17897
         # value embedding code simplification inspired by @ragulpr https://github.com/KellerJordan/modded-nanogpt/pull/78
         self.value_embeds = nn.ModuleList([nn.Embedding(vocab_size, model_dim) for _ in range(3)])
-        
+
         self.blocks = nn.ModuleList([Block(model_dim, num_heads, max_seq_len, i, args) for i in range(num_layers)])
 
         # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency.
@@ -452,10 +462,10 @@ class GPT(nn.Module):
         skip_connections = []
         num_skip = len(self.skip_weights)
 
-        for _ in range(n_passes):  # for multiple passes over the layers
+        for pass_idx in range(n_passes):  # for multiple passes over the layers
             # "Down" pass: gather skip connections
             for i in range(num_skip):
-                x = self.blocks[i](x, value_embeddings[i], x0, block_masks[i])
+                x = self.blocks[i](x, value_embeddings[i], x0, block_masks[i], pass_idx)
                 skip_connections.append(x)
 
             # "Up" pass: retrieve and apply skip connections
