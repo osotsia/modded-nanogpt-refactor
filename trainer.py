@@ -262,7 +262,7 @@ def val_loop(model, args, rank, world_size, step):
     with torch.no_grad():
         for _ in range(val_steps):
             inputs, targets = next(val_loader)
-            loss = model(inputs, targets, get_window_size_blocks(step), n_passes=5)
+            loss = model(inputs, targets, get_window_size_blocks(step), n_passes=2)
             total_val_loss += loss
 
     avg_val_loss = total_val_loss / val_steps
@@ -321,7 +321,7 @@ def train_loop(model, train_loader, optimizers, optimizer2, args,
         inputs, targets = next(train_loader)
         # inputs, targets = train_loader.get_batch(batch_size=get_warmup_batch_size(step))
 
-        n_passes = 2 if step > 0 and step % 100 == 0 else 1
+        n_passes = 2 if step > 0 and step % 10 == 0 else 1
 
         train_loss = model(inputs, targets, get_window_size_blocks(step), n_passes=n_passes)
         train_loss.backward()
