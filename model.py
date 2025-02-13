@@ -354,7 +354,7 @@ class Block(nn.Module):
 
         # Let block see pass index
         self.pass_embed = nn.Embedding(8, dim)  # 8 is arbitrary max num of passes
-        self.pass_linear = nn.Linear(dim, dim)
+        self.pass_linear = CastedLinear(dim, dim)
 
     def forward(self, x: Tensor, ve: Tensor | None, x0: Tensor, block_mask: BlockMask, pass_idx: int = 0):
         x = self.lambdas[0] * x + self.lambdas[1] * x0
