@@ -114,7 +114,6 @@ class Hyperparameters:
     rank: int = rank
 
 
-
 args = Hyperparameters()
 
 # begin logging
@@ -170,7 +169,7 @@ head_params = [model.lm_head.weight]
 
 # init the optimizer(s)
 adam_params = [
-    {"params": head_params, "lr": 0.22/768**0.5},
+    {"params": head_params, "lr": 0.22 / 768 ** 0.5},
     {"params": embed_params, "lr": 0.6},
     {"params": scalar_params, "lr": 0.04},
 ]
@@ -209,6 +208,7 @@ def get_window_size_blocks(step: int):
     # increase by @fernbear.bsky.social; block-wise by @YouJiacheng
     window_size = next_multiple_of_n(1728 * x, n=128)
     return get_window_size_blocks_helper(window_size)
+
 
 model: nn.Module = torch.compile(model, dynamic=False)
 
@@ -324,7 +324,7 @@ def train_loop(model, train_loader, optimizers, optimizer2, args,
         inputs, targets = next(train_loader)
         # inputs, targets = train_loader.get_batch(batch_size=get_warmup_batch_size(step))
 
-        n_passes = 2 if step > 0 and step % 10 == 0 else 1
+        n_passes = 2 #if step > 0 and step % 10 == 0 else 1
 
         train_loss = model(inputs, targets, get_window_size_blocks(step), n_passes=n_passes)
         train_loss.backward()
