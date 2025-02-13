@@ -471,7 +471,7 @@ class GPT(nn.Module):
             # "Up" pass: retrieve and apply skip connections
             for i in range(num_skip, len(self.blocks)):
                 x = x + self.skip_weights[i - num_skip] * skip_connections.pop()
-                x = self.blocks[i](x, value_embeddings[i], x0, block_masks[i])
+                x = self.blocks[i](x, value_embeddings[i], x0, block_masks[i], pass_idx)
 
         logits = self.lm_head(norm(x))
 
