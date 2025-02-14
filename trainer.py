@@ -226,8 +226,7 @@ initial_state = dict(model=copy.deepcopy(model.state_dict()),
                      optimizers=[copy.deepcopy(opt.state_dict()) for opt in optimizers])  # save the initial state
 for _ in tqdm(range(warmup_steps)):
     inputs = targets = torch.randint(0, args.vocab_size, size=(args.train_seq_len,), device="cuda")
-    loss = model(inputs.to(torch.int32), targets, get_window_size_blocks(0), n_passes=1) + \
-           model(inputs.to(torch.int32), targets, get_window_size_blocks(0), n_passes=2)
+    loss = model(inputs.to(torch.int32), targets, get_window_size_blocks(0))
     loss.backward()
 
     for param in model.parameters():
@@ -323,9 +322,7 @@ def train_loop(model, train_loader, optimizers, optimizer2, args,
         # --------------- TRAINING SECTION -----------------
         inputs, targets = next(train_loader)
 
-        n_passes = 2 if step>1500 and step % 2 == 0 else 1
-
-        train_loss = model(inputs, targets, get_window_size_blocks(step), n_passes=n_passes)
+        train_loss = model(inputs, targets, get_window_size_blocks(step))
         train_loss.backward()
 
         # Average gradients across distributed processes

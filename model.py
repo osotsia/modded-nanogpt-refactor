@@ -345,24 +345,15 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, dim: int, num_heads: int, max_seq_len: int, layer_idx: int, args):
+    def __init__(self, dim: int, num_heads: int, max_seq_len: int, layer_idx: int):
         super().__init__()
         # skip attention of blocks.7 (the 8th layer) by @YouJiacheng
         self.attn = CausalSelfAttention(dim, num_heads, max_seq_len) if layer_idx != 7 else None
         self.mlp = MLP(dim)
         self.lambdas = nn.Parameter(torch.tensor([1., 0.]))
 
-        # Let block see pass index
-        self.pass_embed = nn.Embedding(8, dim)  # 8 is arbitrary max num of passes
-        self.pass_linear = CastedLinear(dim, dim)
-
-    def forward(self, x: Tensor, ve: Tensor | None, x0: Tensor, block_mask: BlockMask, pass_idx: int = 0):
+    def forward(self, x: Tensor, ve: Tensor | None, x0: Tensor, block_mask: BlockMask):
         x = self.lambdas[0] * x + self.lambdas[1] * x0
-
-        # Add pass embedding
-        pass_emb = self.pass_embed(torch.tensor([pass_idx], device=x.device))
-        pass_emb = self.pass_linear(pass_emb).unsqueeze(0)  # shape [1, 1, dim]
-        x = x + pass_emb
 
         if self.attn is not None:
             x = x + self.attn(norm(x), ve, block_mask)
@@ -434,7 +425,7 @@ class GPT(nn.Module):
         # Long-short SWA block masks by @leloykun & @YouJiacheng, adapated from suggestion by @Grad62304977, following Gemma 2 paper
         return build_bm(sliding_window_num_blocks), build_bm(sliding_window_num_blocks // 2)
 
-    def forward(self, input_seq: Tensor, target_seq: Tensor, sliding_window_num_blocks: Tensor, n_passes: int = 1) -> Tensor:
+    def forward(self, input_seq: Tensor, target_seq: Tensor, sliding_window_num_blocks: Tensor) -> Tensor:
         assert input_seq.ndim == 1, "input_seq must be 1D"
 
         value_embeddings = [embed(input_seq) for embed in self.value_embeds]
@@ -462,16 +453,15 @@ class GPT(nn.Module):
         skip_connections = []
         num_skip = len(self.skip_weights)
 
-        for pass_idx in range(n_passes):  # for multiple passes over the layers
-            # "Down" pass: gather skip connections
-            for i in range(num_skip):
-                x = self.blocks[i](x, value_embeddings[i], x0, block_masks[i], pass_idx)
-                skip_connections.append(x)
+        # "Down" pass: gather skip connections
+        for i in range(num_skip):
+            x = self.blocks[i](x, value_embeddings[i], x0, block_masks[i])
+            skip_connections.append(x)
 
-            # "Up" pass: retrieve and apply skip connections
-            for i in range(num_skip, len(self.blocks)):
-                x = x + self.skip_weights[i - num_skip] * skip_connections.pop()
-                x = self.blocks[i](x, value_embeddings[i], x0, block_masks[i], pass_idx)
+        # "Up" pass: retrieve and apply skip connections
+        for i in range(num_skip, len(self.blocks)):
+            x = x + self.skip_weights[i - num_skip] * skip_connections.pop()
+            x = self.blocks[i](x, value_embeddings[i], x0, block_masks[i])
 
         logits = self.lm_head(norm(x))
 
