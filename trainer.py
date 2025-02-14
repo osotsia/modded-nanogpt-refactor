@@ -323,7 +323,7 @@ def train_loop(model, train_loader, optimizers, optimizer2, args,
         # --------------- TRAINING SECTION -----------------
         inputs, targets = next(train_loader)
 
-        n_passes = 2 if step % 2 == 0 else 1
+        n_passes = 2 if step>1500 and step % 2 == 0 else 1
 
         train_loss = model(inputs, targets, get_window_size_blocks(step), n_passes=n_passes)
         train_loss.backward()
