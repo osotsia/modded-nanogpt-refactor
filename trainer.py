@@ -213,7 +213,11 @@ def get_window_size_blocks(step: int):
 model: nn.Module = torch.compile(model, dynamic=False)
 
 num_trainable_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad) / 1e6
-print0(f"Num trainable parameters: {num_trainable_parameters:.1f}M\n", console=True)
+print0(f"Model num trainable parameters: {num_trainable_parameters:.1f}M\n", console=True)
+
+for idx, block in enumerate(model.blocks):
+    num_trainable_parameters = sum(p.numel() for p in block.parameters() if p.requires_grad) / 1e6
+    print0(f"Block: {idx}, Num trainable parameters: {num_trainable_parameters:.1f}M\n", console=True)
 
 ########################################
 #            Warmup kernels            #
