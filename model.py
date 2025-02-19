@@ -380,7 +380,9 @@ class HybridBlock(nn.Module):
             self.module = CausalSelfAttention(dim, num_heads, max_seq_len)
         elif block_type == "SSM":
             config = MambaConfig(vocab_size=args.vocab_size,
-                                 hidden_size=args.dim,)
+                                 hidden_size=args.dim,
+                                 state_size=20  # trainable param 7.1M -> ? Should be 8.5
+                                 )
             self.module = MambaMixer(config, layer_idx=5)
         else:
             raise ValueError(f"Unknown block_type: {block_type}")
