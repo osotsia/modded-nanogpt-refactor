@@ -2,5 +2,3 @@ numpy
 tqdm
 torch
 huggingface-hub
-transformers
-causal-conv1d

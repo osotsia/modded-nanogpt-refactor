@@ -13,9 +13,6 @@ import torch.nn.functional as F
 import torch.distributed as dist
 # use of FlexAttention contributed by @KoszarskyB
 from torch.nn.attention.flex_attention import BlockMask, flex_attention
-from typing import Optional
-from transformers.models.mamba.modeling_mamba import MambaMixer
-from transformers.models.mamba.configuration_mamba import MambaConfig
 
 
 # torch._inductor.config.coordinate_descent_tuning = True # we have banned this flag for new records because it causes compilation to take 30min
@@ -363,45 +360,6 @@ class Block(nn.Module):
         return x
 
 
-class HybridBlock(nn.Module):
-    """
-    A single block that can be 'SSM+MLP' or 'ATTN+MLP'.
-    """
-
-    def __init__(self, block_type: str, dim: int, num_heads: int, max_seq_len: int, args):
-        super().__init__()
-        self.block_type = block_type
-
-        # Weighted skip connection
-        self.lambdas = nn.Parameter(torch.tensor([1.0, 0.0]))
-
-        # Decide which core module to use
-        if block_type == "ATTN":
-            self.module = CausalSelfAttention(dim, num_heads, max_seq_len)
-        elif block_type == "SSM":
-            config = MambaConfig(vocab_size=args.vocab_size,
-                                 hidden_size=args.dim,
-                                 state_size=20  # trainable param 7.1M -> ? Should be 8.5
-                                 )
-            self.module = MambaMixer(config, layer_idx=5)
-        else:
-            raise ValueError(f"Unknown block_type: {block_type}")
-
-        self.mlp = MLP(dim)
-
-    def forward(self, x: torch.Tensor, ve: Optional[torch.Tensor], x0: torch.Tensor,
-                block_mask: Optional[torch.Tensor]):
-        # Weighted skip
-        x = self.lambdas[0] * x + self.lambdas[1] * x0
-
-        if self.block_type == "ATTN":
-            x = x + self.module(norm(x), ve, block_mask)
-        if self.block_type == "SSM":
-            x = x + self.module(norm(x), attention_mask=block_mask)
-
-        x = x + self.mlp(norm(x))
-        return x
-
 
 # -----------------------------------------------------------------------------
 # The main model
@@ -413,19 +371,8 @@ class GPT(nn.Module):
         # token value embeddings by @KoszarskyB - inspired by @Grad62304977's value residual implementation following https://arxiv.org/abs/2410.17897
         # value embedding code simplification inspired by @ragulpr https://github.com/KellerJordan/modded-nanogpt/pull/78
         self.value_embeds = nn.ModuleList([nn.Embedding(vocab_size, model_dim) for _ in range(3)])
-        # self.blocks = nn.ModuleList([Block(model_dim, num_heads, max_seq_len, i, args) for i in range(num_layers)])
 
-        LAYER_ORDER = ["ATTN" if layer_idx == 5 else "SSM" for layer_idx in range(num_layers)]
-        self.blocks = nn.ModuleList([
-            HybridBlock(
-                block_type=bt,
-                dim=model_dim,
-                num_heads=num_heads,
-                max_seq_len=max_seq_len,
-                args=args,
-            )
-            for bt in LAYER_ORDER
-        ])
+        self.blocks = nn.ModuleList([Block(model_dim, num_heads, max_seq_len, i, args) for i in range(num_layers)])
 
         # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency.
         # suggested to me by @Grad62304977. this originates from Karpathy's experiments.
