@@ -210,6 +210,7 @@ class Muon(torch.optim.Optimizer):
                     buf: Tensor = state["momentum_buffer"]
                     buf.lerp_(g, 1 - group["momentum"])
                     g = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
+                    '''
                     # ----------------------------------------------------------
                     # g orthogonal to p
                     # ----------------------------------------------------------
@@ -221,6 +222,7 @@ class Muon(torch.optim.Optimizer):
                     g_flat = g_flat - proj_factor * p_flat
                     g = g_flat.view_as(g)
                     # ----------------------------------------------------------
+                    '''
                     g = zeropower_via_newtonschulz5(g, steps=group["ns_steps"]).flatten()
                 else:
                     g = update_buffer_views[self.rank]
@@ -383,7 +385,15 @@ class GPT(nn.Module):
         # value embedding code simplification inspired by @ragulpr https://github.com/KellerJordan/modded-nanogpt/pull/78
         self.value_embeds = nn.ModuleList([nn.Embedding(vocab_size, model_dim) for _ in range(3)])
 
-        self.blocks = nn.ModuleList([Block(model_dim, num_heads, max_seq_len, i, args) for i in range(num_layers)])
+        self.blocks = nn.ModuleList([
+            Block(dim=model_dim,
+                  num_heads=num_heads,
+                  max_seq_len=max_seq_len,
+                  layer_idx=i,
+                  args=args,
+                  )
+            for i in range(num_layers)
+        ])
 
         # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency.
         # suggested to me by @Grad62304977. this originates from Karpathy's experiments.
