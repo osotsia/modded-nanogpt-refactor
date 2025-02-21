@@ -210,19 +210,6 @@ class Muon(torch.optim.Optimizer):
                     buf: Tensor = state["momentum_buffer"]
                     buf.lerp_(g, 1 - group["momentum"])
                     g = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
-                    '''
-                    # ----------------------------------------------------------
-                    # g orthogonal to p
-                    # ----------------------------------------------------------
-                    p_flat = p.flatten()
-                    g_flat = g.flatten()
-                    dot_pg = (p_flat * g_flat).sum()
-                    dot_pp = (p_flat * p_flat).sum().clamp_min(1e-12)
-                    proj_factor = dot_pg / dot_pp
-                    g_flat = g_flat - proj_factor * p_flat
-                    g = g_flat.view_as(g)
-                    # ----------------------------------------------------------
-                    '''
                     g = zeropower_via_newtonschulz5(g, steps=group["ns_steps"]).flatten()
                 else:
                     g = update_buffer_views[self.rank]
@@ -306,6 +293,15 @@ class Rotary(nn.Module):
 class CausalSelfAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int, max_seq_len: int, head_dim=128):
         super().__init__()
+        # add learnable parameters for KV-shifting
+        # initialize alpha_1, beta_1 randomly and set alpha_2 = (1 - alpha_1), beta_2 = (1 - beta_1)
+        alpha_init = torch.rand(1).item()
+        beta_init = torch.rand(1).item()
+        self.alpha_1 = nn.Parameter(torch.tensor(alpha_init))
+        self.alpha_2 = nn.Parameter(torch.tensor(1.0 - alpha_init))
+        self.beta_1 = nn.Parameter(torch.tensor(beta_init))
+        self.beta_2 = nn.Parameter(torch.tensor(1.0 - beta_init))
+
         self.num_heads = num_heads
         self.head_dim = head_dim
         hdim = num_heads * head_dim
@@ -323,17 +319,39 @@ class CausalSelfAttention(nn.Module):
         self.attn_scale = 0.12
 
     def forward(self, x: Tensor, ve: Tensor | None, block_mask: BlockMask):
+        # define a shift function for K and V along sequence dimension
+        def shift(tensor):
+            # tensor shape: [B, T, nHeads, head_dim]
+            # shift by one in T, zero-pad the first position
+            # effectively discarding last token and padding a zero at the start
+            B_, T_, H_, D_ = tensor.shape
+            zero_pad = tensor.new_zeros((B_, 1, H_, D_))
+            # left-shift by 1 along the sequence dimension
+            return torch.cat([zero_pad, tensor[:, :-1, :, :]], dim=1)
+
         B, T = x.size(0), x.size(1)  # batch size, sequence length
         assert B == 1, "Must use batch size = 1 for FlexAttention"
         q, k, v = F.linear(x, self.qkv_w.flatten(end_dim=1).type_as(x)).view(B, T, 3 * self.num_heads,
                                                                              self.head_dim).chunk(3, dim=-2)
         q, k = norm(q), norm(k)  # QK norm @Grad62304977
         q, k = self.rotary(q), self.rotary(k)
+
+        # apply the KV-shift from Eq. (6) and (7)
+        k_shifted = shift(k)
+        v_shifted = shift(v)
+        hatK = self.alpha_1 * k + self.alpha_2 * k_shifted
+        hatV = self.beta_1 * v + self.beta_2 * v_shifted
+
         if ve is not None:
-            v = self.lambdas[0] * v + self.lambdas[1] * ve.view_as(v)  # @KoszarskyB & @Grad62304977
+            # v = self.lambdas[0] * v + self.lambdas[1] * ve.view_as(v)  # @KoszarskyB & @Grad62304977
+            hatV = self.lambdas[0] * hatV + self.lambdas[1] * ve.view_as(hatV)
         else:  # skip mid-layers token value embeddings by @YouJiacheng
-            v = self.lambdas[0] * v
-        y = flex_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), block_mask=block_mask,
+            # v = self.lambdas[0] * v
+            hatV = self.lambdas[0] * hatV
+        y = flex_attention(q.transpose(1, 2),
+                           hatK.transpose(1, 2),
+                           hatV.transpose(1, 2),
+                           block_mask=block_mask,
                            scale=self.attn_scale).transpose(1, 2)
         y = y.contiguous().view(B, T, self.num_heads * self.head_dim)  # re-assemble all head outputs side by side
         y = self.c_proj(y)
@@ -373,7 +391,6 @@ class Block(nn.Module):
         return x
 
 
-
 # -----------------------------------------------------------------------------
 # The main model
 
@@ -399,7 +416,7 @@ class GPT(nn.Module):
         # suggested to me by @Grad62304977. this originates from Karpathy's experiments.
         self.lm_head = CastedLinear(model_dim, next_multiple_of_n(vocab_size, n=128), use_fp8=True, x_s=0.5,
                                     w_s=2 ** -9, grad_s=2 ** -19)
-        self.lm_head.weight.detach().zero_()  # @Grad62304977
+        nn.init.zeros_(self.lm_head.weight)  # @Grad62304977
         # Add learnable skip connection weights for decoder layers
         assert num_layers % 2 == 0
         self.skip_weights = nn.Parameter(torch.ones(num_layers // 2))
