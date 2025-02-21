@@ -210,6 +210,17 @@ class Muon(torch.optim.Optimizer):
                     buf: Tensor = state["momentum_buffer"]
                     buf.lerp_(g, 1 - group["momentum"])
                     g = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
+                    # ----------------------------------------------------------
+                    # g orthogonal to p
+                    # ----------------------------------------------------------
+                    p_flat = p.flatten()
+                    g_flat = g.flatten()
+                    dot_pg = (p_flat * g_flat).sum()
+                    dot_pp = (p_flat * p_flat).sum().clamp_min(1e-12)
+                    proj_factor = dot_pg / dot_pp
+                    g_flat = g_flat - proj_factor * p_flat
+                    g = g_flat.view_as(g)
+                    # ----------------------------------------------------------
                     g = zeropower_via_newtonschulz5(g, steps=group["ns_steps"]).flatten()
                 else:
                     g = update_buffer_views[self.rank]
