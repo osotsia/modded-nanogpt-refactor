@@ -304,8 +304,8 @@ class CausalSelfAttention(nn.Module):
         self.qkv_w = nn.Parameter(torch.empty(3, hdim, dim).uniform_(-bound, bound))
 
         # Data-dependent shift parameters
-        self.w_shift_k = nn.Linear(dim, 1)  # generates alpha_k(t)
-        self.w_shift_v = nn.Linear(dim, 1)  # generates alpha_v(t)
+        self.w_shift_k = CastedLinear(dim, 1)  # generates alpha_k(t)
+        self.w_shift_v = CastedLinear(dim, 1)  # generates alpha_v(t)
 
         # If we want to combine v with ve (an external embedding)
         self.lambdas = nn.Parameter(torch.tensor([0.5, 0.5]))
@@ -330,7 +330,7 @@ class CausalSelfAttention(nn.Module):
 
         def data_dependent_token_shift(seq: torch.Tensor, alpha: torch.Tensor, do_norm: bool = False) -> torch.Tensor:
             """
-            Iteratively blend each token's embedding with the previous one using
+            Blend each token's embedding with the previous one using
             a data-dependent scalar (alpha).
 
             seq:   [B, T, nHeads, head_dim]
@@ -358,7 +358,7 @@ class CausalSelfAttention(nn.Module):
         alpha_k = torch.sigmoid(self.w_shift_k(x)).unsqueeze(-2)
         alpha_v = torch.sigmoid(self.w_shift_v(x)).unsqueeze(-2)
 
-        # 3) Iteratively blend K and V
+        # 3) Blend K and V using the alphas
         k_new = data_dependent_token_shift(k, alpha_k, do_norm=True)
         v_new = data_dependent_token_shift(v, alpha_v, do_norm=False)
 
