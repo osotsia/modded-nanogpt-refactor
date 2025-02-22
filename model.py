@@ -293,69 +293,99 @@ class Rotary(nn.Module):
 class CausalSelfAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int, max_seq_len: int, head_dim=128):
         super().__init__()
-        # add learnable parameters for KV-shifting
-        # initialize alpha_1, beta_1 randomly and set alpha_2 = (1 - alpha_1), beta_2 = (1 - beta_1)
-        alpha_init = torch.rand(1).item()
-        beta_init = torch.rand(1).item()
-        self.alpha_1 = nn.Parameter(torch.tensor(alpha_init))
-        self.alpha_2 = nn.Parameter(torch.tensor(1.0 - alpha_init))
-        self.beta_1 = nn.Parameter(torch.tensor(beta_init))
-        self.beta_2 = nn.Parameter(torch.tensor(1.0 - beta_init))
-
         self.num_heads = num_heads
         self.head_dim = head_dim
+
+        # merged QKV weights: suggested by many, implemented by @fernbear.bsky.social, and further improved by @YouJiacheng
+        # https://x.com/hi_tysam/status/1879699187107033311
         hdim = num_heads * head_dim
         std = 0.5 * (dim ** -0.5)
         bound = (3 ** 0.5) * std  # improved init scale by @YouJiacheng
-        # merged QKV weights: suggested by many, implemented by @fernbear.bsky.social, and further improved by @YouJiacheng
-        # https://x.com/hi_tysam/status/1879699187107033311
         self.qkv_w = nn.Parameter(torch.empty(3, hdim, dim).uniform_(-bound, bound))
+
+        # Data-dependent shift parameters
+        self.w_shift_k = nn.Linear(dim, 1)  # generates alpha_k(t)
+        self.w_shift_v = nn.Linear(dim, 1)  # generates alpha_v(t)
+
+        # If we want to combine v with ve (an external embedding)
         self.lambdas = nn.Parameter(torch.tensor([0.5, 0.5]))
+
+        # Rotary embedding
         self.rotary = Rotary(head_dim, max_seq_len)
+
+        # Output projection
         self.c_proj = CastedLinear(hdim, dim)
-        self.c_proj.weight.detach().zero_()  # zero init suggested by @Grad62304977
+        nn.init.zeros_(self.c_proj.weight)  # zero init suggested by @Grad62304977
+
         # scale the attention logits by given constant, instead of the default head_dim**-0.5, by @leloykun
         # inspired by learnable scalars used by @brendanh0gan https://x.com/hi_tysam/status/1879693583898591283
         self.attn_scale = 0.12
 
     def forward(self, x: Tensor, ve: Tensor | None, block_mask: BlockMask):
-        # define a shift function for K and V along sequence dimension
-        def shift(tensor):
-            # tensor shape: [B, T, nHeads, head_dim]
-            # shift by one in T, zero-pad the first position
-            # effectively discarding last token and padding a zero at the start
-            B_, T_, H_, D_ = tensor.shape
-            zero_pad = tensor.new_zeros((B_, 1, H_, D_))
-            # left-shift by 1 along the sequence dimension
-            return torch.cat([zero_pad, tensor[:, :-1, :, :]], dim=1)
+        """
+        x: [B, T, dim]
+        ve: optional external value embedding
+        block_mask: used for causal masking
+        """
 
-        B, T = x.size(0), x.size(1)  # batch size, sequence length
+        def data_dependent_token_shift(seq: torch.Tensor, alpha: torch.Tensor, do_norm: bool = False) -> torch.Tensor:
+            """
+            Iteratively blend each token's embedding with the previous one using
+            a data-dependent scalar (alpha).
+
+            seq:   [B, T, nHeads, head_dim]
+            alpha: [B, T, 1, 1], each alpha in [0,1]
+            do_norm: whether to apply rms_norm
+            """
+            seq = seq.clone()
+            _, T, _, _ = seq.shape
+            for t in range(1, T):
+                a_t = alpha[:, t]  # shape [B, 1, 1]
+                seq[:, t] = a_t * seq[:, t - 1] + (1.0 - a_t) * seq[:, t]
+                if do_norm:
+                    seq[:, t] = norm(seq[:, t])
+            return seq
+
+        B, T, D = x.shape
         assert B == 1, "Must use batch size = 1 for FlexAttention"
-        q, k, v = F.linear(x, self.qkv_w.flatten(end_dim=1).type_as(x)).view(B, T, 3 * self.num_heads,
-                                                                             self.head_dim).chunk(3, dim=-2)
-        q, k = norm(q), norm(k)  # QK norm @Grad62304977
-        q, k = self.rotary(q), self.rotary(k)
 
-        # apply the KV-shift from Eq. (6) and (7)
-        k_shifted = shift(k)
-        v_shifted = shift(v)
-        hatK = self.alpha_1 * k + self.alpha_2 * k_shifted
-        hatV = self.beta_1 * v + self.beta_2 * v_shifted
+        # 1) Compute Q, K, V from x
+        q, k, v = F.linear(x, self.qkv_w.flatten(end_dim=1).type_as(x)) \
+            .view(B, T, 3 * self.num_heads, self.head_dim) \
+            .chunk(3, dim=-2)
 
+        # 2) Compute alpha_k(t), alpha_v(t) per token, shape [B, T, 1, 1]
+        alpha_k = torch.sigmoid(self.w_shift_k(x)).unsqueeze(-2)
+        alpha_v = torch.sigmoid(self.w_shift_v(x)).unsqueeze(-2)
+
+        # 3) Iteratively blend K and V
+        k_new = data_dependent_token_shift(k, alpha_k, do_norm=True)
+        v_new = data_dependent_token_shift(v, alpha_v, do_norm=False)
+
+        # 4) If external value embedding is provided, combine
         if ve is not None:
-            # v = self.lambdas[0] * v + self.lambdas[1] * ve.view_as(v)  # @KoszarskyB & @Grad62304977
-            hatV = self.lambdas[0] * hatV + self.lambdas[1] * ve.view_as(hatV)
+            v_new = self.lambdas[0] * v_new + self.lambdas[1] * ve.view_as(v_new)  # @KoszarskyB & @Grad62304977
         else:  # skip mid-layers token value embeddings by @YouJiacheng
-            # v = self.lambdas[0] * v
-            hatV = self.lambdas[0] * hatV
-        y = flex_attention(q.transpose(1, 2),
-                           hatK.transpose(1, 2),
-                           hatV.transpose(1, 2),
-                           block_mask=block_mask,
-                           scale=self.attn_scale).transpose(1, 2)
-        y = y.contiguous().view(B, T, self.num_heads * self.head_dim)  # re-assemble all head outputs side by side
-        y = self.c_proj(y)
-        return y
+            v_new = self.lambdas[0] * v_new
+
+        # 5) Norm and rope after shifting
+        q, k_new = norm(q), norm(k_new)
+        q, k_new = self.rotary(q), self.rotary(k_new)
+
+        # 6) Run attention
+        out = flex_attention(
+            q.transpose(1, 2),
+            k_new.transpose(1, 2),
+            v_new.transpose(1, 2),
+            block_mask=block_mask,
+            scale=self.attn_scale
+        ).transpose(1, 2)
+
+        # 7) Re-assemble all head outputs side by side & project
+        out = out.contiguous() \
+            .view(B, T, self.num_heads * self.head_dim)
+        out = self.c_proj(out)
+        return out
 
 
 class MLP(nn.Module):
