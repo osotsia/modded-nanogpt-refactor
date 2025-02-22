@@ -303,9 +303,11 @@ class CausalSelfAttention(nn.Module):
         bound = (3 ** 0.5) * std  # improved init scale by @YouJiacheng
         self.qkv_w = nn.Parameter(torch.empty(3, hdim, dim).uniform_(-bound, bound))
 
-        # Data-dependent shift parameters
-        self.w_shift_k = CastedLinear(dim, 1)  # generates alpha_k(t)
-        self.w_shift_v = CastedLinear(dim, 1)  # generates alpha_v(t)
+        # Data-dependent (independent) shift parameters
+        self.w_shift_ak = CastedLinear(dim, 1)  # produces a_k(t)
+        self.w_shift_bk = CastedLinear(dim, 1)  # produces b_k(t)
+        self.w_shift_av = CastedLinear(dim, 1)  # produces a_v(t)
+        self.w_shift_bv = CastedLinear(dim, 1)  # produces b_v(t)
 
         # If we want to combine v with ve (an external embedding)
         self.lambdas = nn.Parameter(torch.tensor([0.5, 0.5]))
@@ -328,23 +330,26 @@ class CausalSelfAttention(nn.Module):
         block_mask: used for causal masking
         """
 
-        def data_dependent_token_shift(seq: torch.Tensor, alpha: torch.Tensor, do_norm: bool = False) -> torch.Tensor:
+        def data_dependent_blend(seq: torch.Tensor, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
             """
-            Blend each token's embedding with the previous one using
-            a data-dependent scalar (alpha).
+            Vectorized computation of the iterative blend
+            """
+            B, T, H, D = seq.shape
 
-            seq:   [B, T, nHeads, head_dim]
-            alpha: [B, T, 1, 1], each alpha in [0,1]
-            do_norm: whether to apply rms_norm
-            """
-            seq = seq.clone()
-            _, T, _, _ = seq.shape
-            for t in range(1, T):
-                a_t = alpha[:, t]  # shape [B, 1, 1]
-                seq[:, t] = a_t * seq[:, t - 1] + (1.0 - a_t) * seq[:, t]
-                if do_norm:
-                    seq[:, t] = norm(seq[:, t])
-            return seq
+            # 1) prefix_a[t] = a[0]*a[1]*...*a[t-1]
+            a_shifted = torch.cat([torch.ones(B, 1, H, D, device=seq.device, dtype=seq.dtype), a[:, :-1]], dim=1)
+            prefix_a = torch.cumprod(a_shifted, dim=1)  # [B, T, H, D]
+
+            # 2) c[t] = (b[t] * seq[t]) / prefix_a[t]
+            c = b * seq / (prefix_a + 1e-9)
+            c[:, 0] = 0.0  # ensures S[0] = seq[0] exactly
+
+            # 3) z[t] = cumulative sum of c along time
+            z = torch.cumsum(c, dim=1)
+
+            # 4) S[t] = prefix_a[t] * [ seq[0] + z[t] ]
+            S = prefix_a * (seq[:, 0:1] + z)
+            return S
 
         B, T, D = x.shape
         assert B == 1, "Must use batch size = 1 for FlexAttention"
@@ -354,13 +359,15 @@ class CausalSelfAttention(nn.Module):
             .view(B, T, 3 * self.num_heads, self.head_dim) \
             .chunk(3, dim=-2)
 
-        # 2) Compute alpha_k(t), alpha_v(t) per token, shape [B, T, 1, 1]
-        alpha_k = torch.sigmoid(self.w_shift_k(x)).unsqueeze(-2)
-        alpha_v = torch.sigmoid(self.w_shift_v(x)).unsqueeze(-2)
+        # 3) Produce data-dependent shift coefficients
+        a_k = torch.sigmoid(self.w_shift_ak(x)).unsqueeze(-2).expand(-1, -1, self.num_heads, self.head_dim)
+        b_k = torch.sigmoid(self.w_shift_bk(x)).unsqueeze(-2).expand(-1, -1, self.num_heads, self.head_dim)
+        a_v = torch.sigmoid(self.w_shift_av(x)).unsqueeze(-2).expand(-1, -1, self.num_heads, self.head_dim)
+        b_v = torch.sigmoid(self.w_shift_bv(x)).unsqueeze(-2).expand(-1, -1, self.num_heads, self.head_dim)
 
-        # 3) Blend K and V using the alphas
-        k_new = data_dependent_token_shift(k, alpha_k, do_norm=True)
-        v_new = data_dependent_token_shift(v, alpha_v, do_norm=False)
+        # 3) Blend K and V
+        k_new = data_dependent_blend(k, a_k, b_k)
+        v_new = data_dependent_blend(v, a_v, b_v)
 
         # 4) If external value embedding is provided, combine
         if ve is not None:
