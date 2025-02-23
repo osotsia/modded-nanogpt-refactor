@@ -303,11 +303,9 @@ class CausalSelfAttention(nn.Module):
         bound = (3 ** 0.5) * std  # improved init scale by @YouJiacheng
         self.qkv_w = nn.Parameter(torch.empty(3, hdim, dim).uniform_(-bound, bound))
 
-        # Data-dependent (independent) shift parameters
-        self.w_shift_ak = CastedLinear(dim, 1)  # produces a_k(t)
-        self.w_shift_bk = CastedLinear(dim, 1)  # produces b_k(t)
-        self.w_shift_av = CastedLinear(dim, 1)  # produces a_v(t)
-        self.w_shift_bv = CastedLinear(dim, 1)  # produces b_v(t)
+        # Data-dependent shift parameters (learn alpha per token)
+        self.w_shift_k = CastedLinear(dim, 1)  # alpha for keys
+        self.w_shift_v = CastedLinear(dim, 1)  # alpha for values
 
         # If we want to combine v with ve (an external embedding)
         self.lambdas = nn.Parameter(torch.tensor([0.5, 0.5]))
@@ -330,26 +328,20 @@ class CausalSelfAttention(nn.Module):
         block_mask: used for causal masking
         """
 
-        def data_dependent_blend(seq: torch.Tensor, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+        def data_dependent_blend(x: torch.Tensor, alpha: torch.Tensor) -> torch.Tensor:
             """
-            Vectorized computation of the iterative blend
+            x:     [B, T, H, D]
+            alpha: [B, T, 1, 1], with values in [0,1]
             """
-            B, T, H, D = seq.shape
+            # Shift x by 1 step along sequence dimension (dim=1).
+            shift_x = torch.roll(x, 1, dims=1)
+            # For t=0, we overwrite the shifted data with x[0],
+            # ensuring out[0] = x[0].
+            shift_x[:, 0] = x[:, 0]
 
-            # 1) prefix_a[t] = a[0]*a[1]*...*a[t-1]
-            a_shifted = torch.cat([torch.ones(B, 1, H, D, device=seq.device, dtype=seq.dtype), a[:, :-1]], dim=1)
-            prefix_a = torch.cumprod(a_shifted, dim=1)  # [B, T, H, D]
-
-            # 2) c[t] = (b[t] * seq[t]) / prefix_a[t]
-            c = b * seq / (prefix_a + 1e-9)
-            c[:, 0] = 0.0  # ensures S[0] = seq[0] exactly
-
-            # 3) z[t] = cumulative sum of c along time
-            z = torch.cumsum(c, dim=1)
-
-            # 4) S[t] = prefix_a[t] * [ seq[0] + z[t] ]
-            S = prefix_a * (seq[:, 0:1] + z)
-            return S
+            # out[t] = alpha[t]* shift_x[t] + (1 - alpha[t])* x[t]
+            # which for t=0 becomes x[0], and for t>=1 becomes the blend.
+            return alpha * shift_x + (1.0 - alpha) * x
 
         B, T, D = x.shape
         assert B == 1, "Must use batch size = 1 for FlexAttention"
@@ -359,21 +351,20 @@ class CausalSelfAttention(nn.Module):
             .view(B, T, 3 * self.num_heads, self.head_dim) \
             .chunk(3, dim=-2)
 
-        # 3) Produce data-dependent shift coefficients
-        a_k = torch.sigmoid(self.w_shift_ak(x)).unsqueeze(-1).expand(-1, -1, self.num_heads, self.head_dim)
-        b_k = torch.sigmoid(self.w_shift_bk(x)).unsqueeze(-1).expand(-1, -1, self.num_heads, self.head_dim)
-        a_v = torch.sigmoid(self.w_shift_av(x)).unsqueeze(-1).expand(-1, -1, self.num_heads, self.head_dim)
-        b_v = torch.sigmoid(self.w_shift_bv(x)).unsqueeze(-1).expand(-1, -1, self.num_heads, self.head_dim)
+        # 3) Compute alpha per token for K, V. Shape: [B, T, 1, 1]
+        alpha_k = torch.sigmoid(self.w_shift_k(x)).unsqueeze(-1)
+        alpha_v = torch.sigmoid(self.w_shift_v(x)).unsqueeze(-1)
 
-        # 3) Blend K and V
-        k_new = data_dependent_blend(k, a_k, b_k)
-        v_new = data_dependent_blend(v, a_v, b_v)
+        # 4) Blend keys and values (no norm)
+        k_new = data_dependent_blend(k, alpha_k)
+        v_new = data_dependent_blend(v, alpha_v)
+
 
         # 4) If external value embedding is provided, combine
         if ve is not None:
             v_new = self.lambdas[0] * v_new + self.lambdas[1] * ve.view_as(v_new)  # @KoszarskyB & @Grad62304977
-        else:  # skip mid-layers token value embeddings by @YouJiacheng
-            v_new = self.lambdas[0] * v_new
+        # else:  # skip mid-layers token value embeddings by @YouJiacheng
+        #    v_new = self.lambdas[0] * v_new
 
         # 5) Norm and rope after shifting
         q, k_new = norm(q), norm(k_new)
