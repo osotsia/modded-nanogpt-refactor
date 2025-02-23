@@ -360,10 +360,10 @@ class CausalSelfAttention(nn.Module):
             .chunk(3, dim=-2)
 
         # 3) Produce data-dependent shift coefficients
-        a_k = torch.sigmoid(self.w_shift_ak(x)).unsqueeze(-2).expand(-1, -1, self.num_heads, self.head_dim)
-        b_k = torch.sigmoid(self.w_shift_bk(x)).unsqueeze(-2).expand(-1, -1, self.num_heads, self.head_dim)
-        a_v = torch.sigmoid(self.w_shift_av(x)).unsqueeze(-2).expand(-1, -1, self.num_heads, self.head_dim)
-        b_v = torch.sigmoid(self.w_shift_bv(x)).unsqueeze(-2).expand(-1, -1, self.num_heads, self.head_dim)
+        a_k = torch.sigmoid(self.w_shift_ak(x)).unsqueeze(-1).expand(-1, -1, self.num_heads, self.head_dim)
+        b_k = torch.sigmoid(self.w_shift_bk(x)).unsqueeze(-1).expand(-1, -1, self.num_heads, self.head_dim)
+        a_v = torch.sigmoid(self.w_shift_av(x)).unsqueeze(-1).expand(-1, -1, self.num_heads, self.head_dim)
+        b_v = torch.sigmoid(self.w_shift_bv(x)).unsqueeze(-1).expand(-1, -1, self.num_heads, self.head_dim)
 
         # 3) Blend K and V
         k_new = data_dependent_blend(k, a_k, b_k)
@@ -405,8 +405,7 @@ class MLP(nn.Module):
 
     def forward(self, x: Tensor):
         x = self.c_fc(x)
-        x = F.relu(
-            x).square()  # https://arxiv.org/abs/2109.08668v2; ~1-2% better than GELU; suggested by @SKYLINEZ007 and @Grad62304977
+        x = F.relu(x).square()  # https://arxiv.org/abs/2109.08668v2; ~1-2% better than GELU; suggested by @SKYLINEZ007 and @Grad62304977
         x = self.c_proj(x)
         return x
 
