@@ -351,14 +351,13 @@ class CausalSelfAttention(nn.Module):
             .view(B, T, 3 * self.num_heads, self.head_dim) \
             .chunk(3, dim=-2)
 
-        # 3) Compute alpha per token for K, V. Shape: [B, T, 1, 1]
+        # 2) Compute alpha per token for K, V. Shape: [B, T, 1, 1]
         alpha_k = torch.sigmoid(self.w_shift_k(x)).unsqueeze(-1)
         alpha_v = torch.sigmoid(self.w_shift_v(x)).unsqueeze(-1)
 
-        # 4) Blend keys and values (no norm)
+        # 3) Blend keys and values (no norm)
         k_new = data_dependent_blend(k, alpha_k)
         v_new = data_dependent_blend(v, alpha_v)
-
 
         # 4) If external value embedding is provided, combine
         if ve is not None:
