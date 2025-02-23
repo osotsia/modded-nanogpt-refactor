@@ -416,9 +416,6 @@ class LabelAttentionHead(nn.Module):
             CastedLinear(input_dim, size)
             for size in projected_size_per_head
         ])
-        #nn.init.zeros_(self.first_linears.weight)
-        #nn.init.zeros_(self.second_linears.weight)
-        #nn.init.zeros_(self.third_linears.weight)
 
     def forward(self, hidden_states):
         # 1) Compute per-head weights
@@ -433,7 +430,7 @@ class LabelAttentionHead(nn.Module):
 
         # 4) Compute final logits
         logits = [
-            linear.weight.mul(weight).sum(dim=2).add(linear.bias)
+            linear.weight.mul(weight).sum(dim=2)
             for linear, weight in zip(self.third_linears, weighted_output)
         ]
         return torch.cat(logits, dim=1)
