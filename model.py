@@ -466,7 +466,7 @@ class GPT(nn.Module):
         #                             w_s=2 ** -9, grad_s=2 ** -19)
         self.lm_head = LabelAttentionHead(input_dim=model_dim,
                                           output_dim=next_multiple_of_n(vocab_size, n=128))
-        nn.init.zeros_(self.lm_head.weight)  # @Grad62304977
+        #nn.init.zeros_(self.lm_head.weight)  # @Grad62304977
         # Add learnable skip connection weights for decoder layers
         assert num_layers % 2 == 0
         self.skip_weights = nn.Parameter(torch.ones(num_layers // 2))
