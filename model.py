@@ -416,9 +416,9 @@ class LabelAttentionHead(nn.Module):
             CastedLinear(input_dim, size)
             for size in projected_size_per_head
         ])
-        nn.init.zeros_(self.first_linears.weight)
-        nn.init.zeros_(self.second_linears.weight)
-        nn.init.zeros_(self.third_linears.weight)
+        #nn.init.zeros_(self.first_linears.weight)
+        #nn.init.zeros_(self.second_linears.weight)
+        #nn.init.zeros_(self.third_linears.weight)
 
     def forward(self, hidden_states):
         # 1) Compute per-head weights
@@ -464,7 +464,8 @@ class GPT(nn.Module):
         # suggested to me by @Grad62304977. this originates from Karpathy's experiments.
         # self.lm_head = CastedLinear(model_dim, next_multiple_of_n(vocab_size, n=128), use_fp8=True, x_s=0.5,
         #                             w_s=2 ** -9, grad_s=2 ** -19)
-        self.lm_head = LabelAttentionHead(input_dim=model_dim, output_dim=next_multiple_of_n(vocab_size, n=128))
+        self.lm_head = LabelAttentionHead(input_dim=model_dim,
+                                          output_dim=next_multiple_of_n(vocab_size, n=128))
         nn.init.zeros_(self.lm_head.weight)  # @Grad62304977
         # Add learnable skip connection weights for decoder layers
         assert num_layers % 2 == 0
