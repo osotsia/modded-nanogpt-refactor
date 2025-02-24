@@ -177,7 +177,25 @@ adam_params = [
 # small adam epsilon by @YouJiacheng. this is an alternate method of fixing the world_size dependence
 # discovered by @fernbear.bsky.social https://x.com/hi_tysam/status/1879692937589875094
 optimizer1 = torch.optim.Adam(adam_params, betas=(0.8, 0.95), eps=1e-10, fused=True)
-optimizer2 = Muon(hidden_matrix_params, lr=0.05, momentum=0.95, rank=rank, world_size=world_size)
+# optimizer2 = Muon(hidden_matrix_params, lr=0.05, momentum=0.95, rank=rank, world_size=world_size)
+# optimizers = [optimizer1, optimizer2]
+
+
+# Layer-wise learning rates
+hidden_matrix_param_groups = []
+num_blocks = len(model.blocks)
+base_lr = 0.05  # same as before
+
+for i, block in enumerate(model.blocks):
+    block_params = [p for n, p in block.named_parameters() if p.ndim >= 2 and "embed" not in n]
+    scale = 1.2 ** (num_blocks - i - 1)  # deeper layers get smaller LR
+    lr_i = base_lr * scale
+    hidden_matrix_param_groups.append({
+        "params": block_params,
+        "lr": lr_i
+    })
+
+optimizer2 = Muon(hidden_matrix_param_groups, momentum=0.95, rank=rank, world_size=world_size)
 optimizers = [optimizer1, optimizer2]
 for opt in optimizers:
     for group in opt.param_groups:
