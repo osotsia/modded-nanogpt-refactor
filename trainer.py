@@ -188,7 +188,7 @@ base_lr = 0.05  # same as before
 
 for i, block in enumerate(model.blocks):
     block_params = [p for n, p in block.named_parameters() if p.ndim >= 2 and "embed" not in n]
-    scale = 1.1 ** (num_blocks - i - 1)  # deeper layers get smaller LR
+    scale = 1.05 ** (num_blocks - i - 1)  # deeper layers get smaller LR
     lr_i = base_lr * scale
     hidden_matrix_param_groups.append({"params": block_params, "lr": lr_i})
 
