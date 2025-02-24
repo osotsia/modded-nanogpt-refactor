@@ -186,12 +186,16 @@ hidden_matrix_param_groups = []
 num_blocks = len(model.blocks)
 base_lr = 0.05  # same as before
 
+increasing_lr = [0.05, 0.05272727, 0.05545455, 0.05818182, 0.06090909,
+                 0.06363636, 0.06636364, 0.06909091, 0.07181818, 0.07454545,
+                 0.07727273, 0.08]
+decreasing_lr = [0.05, 0.04727273, 0.04454545, 0.04181818, 0.03909091,
+                 0.03636364, 0.03363636, 0.03090909, 0.02818182, 0.02545455,
+                 0.02272727, 0.02]
 for i, block in enumerate(model.blocks):
     block_params = [p for n, p in block.named_parameters() if p.ndim >= 2 and "embed" not in n]
-    scale = 1.05 ** (num_blocks - i - 1)  # deeper layers get smaller LR
-    lr_i = base_lr * scale
+    lr_i = decreasing_lr[i]
     hidden_matrix_param_groups.append({"params": block_params, "lr": lr_i})
-
 
 optimizer2 = Muon(hidden_matrix_param_groups, momentum=0.95, rank=rank, world_size=world_size)
 optimizers = [optimizer1, optimizer2]
@@ -201,14 +205,18 @@ for opt in optimizers:
 
 
 # learning rate schedule: stable then decay
-def get_lr(step: int):
-    x = step / args.train_num_iterations  # progress in training
-    assert 0 <= x < 1
-    if x < 1 - args.cooldown_frac:
-        return 1.0
-    else:
-        w = (1 - x) / args.cooldown_frac
-        return w * 1.0 + (1 - w) * 0.1
+def get_lr(step: int) -> float:
+    total_steps = args.train_num_iterations
+    cooldown_start_point = total_steps * (1 - args.cooldown_frac)
+
+    if step < cooldown_start_point:
+        return 1.0  # Use the full learning rate before cooldown
+
+    # How far into cooldown we are
+    cooldown_progress = (total_steps - step) / (total_steps - cooldown_start_point)
+
+    # Linearly scale between 1.0 (start of cooldown) and 0.1 (end of training)
+    return cooldown_progress * 1.0 + (1 - cooldown_progress) * 0.1
 
 
 # attention window size schedule: linearly increase
@@ -403,3 +411,8 @@ print0(
 )
 
 dist.destroy_process_group()
+
+num_blocks = 12
+for i in range(12):
+    scale = 1.05 ** (-num_blocks - i + 1)
+    print(round(scale, 2), round(scale * 0.05, 2))
