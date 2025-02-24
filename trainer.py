@@ -190,10 +190,8 @@ for i, block in enumerate(model.blocks):
     block_params = [p for n, p in block.named_parameters() if p.ndim >= 2 and "embed" not in n]
     scale = 1.2 ** (num_blocks - i - 1)  # deeper layers get smaller LR
     lr_i = base_lr * scale
-    hidden_matrix_param_groups.append({
-        "params": block_params,
-        "lr": lr_i
-    })
+    hidden_matrix_param_groups.append({"params": block_params, "lr": lr_i})
+
 
 optimizer2 = Muon(hidden_matrix_param_groups, momentum=0.95, rank=rank, world_size=world_size)
 optimizers = [optimizer1, optimizer2]

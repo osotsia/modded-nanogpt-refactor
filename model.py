@@ -168,18 +168,53 @@ class Muon(torch.optim.Optimizer):
         ns_steps: The number of Newton-Schulz iteration steps to use.
     """
 
-    def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5, rank=0, world_size=1):
+    def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5,
+                 rank=0, world_size=1):
+        """
+        If `params` is already a list of dict (standard PyTorch param-group style),
+        we iterate over it. Otherwise, wrap the single parameter list into a single group.
+        Then, for each group, we further split parameters by total numel so each 2D chunk
+        can have its own update buffer.
+        """
+        if isinstance(params, (list, tuple)) and len(params) > 0 and isinstance(params[0], dict):
+            param_groups = params
+        else:
+            param_groups = [{'params': params}]
+
         self.rank = rank
         self.world_size = world_size
         defaults = dict(lr=lr, momentum=momentum, nesterov=nesterov, ns_steps=ns_steps)
-        params: list[Tensor] = [*params]
-        param_groups = []
-        for size in {p.numel() for p in params}:
-            b = torch.empty(world_size, size, dtype=torch.bfloat16, device="cuda")
-            group = dict(params=[p for p in params if p.numel() == size],
-                         update_buffer=b, update_buffer_views=[b[i] for i in range(world_size)])
-            param_groups.append(group)
-        super().__init__(param_groups, defaults)
+
+        new_param_groups = []
+
+        # For each user-specified group:
+        for group in param_groups:
+            g_lr = group.get("lr", lr)
+            g_momentum = group.get("momentum", momentum)
+            g_nesterov = group.get("nesterov", nesterov)
+            g_ns_steps = group.get("ns_steps", ns_steps)
+            # Group the parameters by identical numel
+            size_to_params = {}
+            for p in group["params"]:
+                sz = p.numel()
+                if sz not in size_to_params:
+                    size_to_params[sz] = []
+                size_to_params[sz].append(p)
+
+            # For each size-group, allocate one update buffer
+            for sz, ps in size_to_params.items():
+                buf = torch.empty(self.world_size, sz, dtype=torch.bfloat16, device="cuda")
+                new_param_groups.append({
+                    "params": ps,
+                    "update_buffer": buf,
+                    "update_buffer_views": [buf[i] for i in range(self.world_size)],
+                    "lr": g_lr,
+                    "momentum": g_momentum,
+                    "nesterov": g_nesterov,
+                    "ns_steps": g_ns_steps
+                    })
+
+        super().__init__(new_param_groups, defaults)
 
     @torch.no_grad()
     def step(self):
