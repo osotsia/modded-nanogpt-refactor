@@ -390,52 +390,6 @@ class Block(nn.Module):
         x = x + self.mlp(norm(x))
         return x
 
-
-class LabelAttentionHead(nn.Module):
-    def __init__(self, input_dim, output_dim, labelattn_num_heads=4):
-        super().__init__()
-        projected_size_per_head = [
-            output_dim // labelattn_num_heads + (1 if i < output_dim % labelattn_num_heads else 0)
-            for i in range(labelattn_num_heads)
-        ]
-
-        # First linear transformations used to compute weights
-        self.first_linears = nn.ModuleList([
-            CastedLinear(input_dim, input_dim)
-            for _ in projected_size_per_head
-        ])
-
-        # Second linear transformations for attention weights
-        self.second_linears = nn.ModuleList([
-            CastedLinear(input_dim, size)
-            for size in projected_size_per_head
-        ])
-
-        # Third linear transformations for final output (logits)
-        self.third_linears = nn.ModuleList([
-            CastedLinear(input_dim, size)
-            for size in projected_size_per_head
-        ])
-
-    def forward(self, hidden_states):
-        # 1) Compute per-head weights
-        weights = [torch.tanh(linear(hidden_states)) for linear in self.first_linears]
-
-        # 2) Compute attention weights and apply softmax
-        att_weights = [linear(weight) for linear, weight in zip(self.second_linears, weights)]
-        att_weights = [F.softmax(weight, dim=1).transpose(1, 2) for weight in att_weights]
-
-        # 3) Weighted output
-        weighted_output = [weight @ hidden_states for weight in att_weights]
-
-        # 4) Compute final logits
-        logits = [
-            linear.weight.mul(weight).sum(dim=2)
-            for linear, weight in zip(self.third_linears, weighted_output)
-        ]
-        return torch.cat(logits, dim=1)
-
-
 # -----------------------------------------------------------------------------
 # The main model
 
@@ -459,11 +413,10 @@ class GPT(nn.Module):
 
         # there are only 50257 unique GPT-2 tokens; we extend to nearest multiple of 128 for efficiency.
         # suggested to me by @Grad62304977. this originates from Karpathy's experiments.
-        # self.lm_head = CastedLinear(model_dim, next_multiple_of_n(vocab_size, n=128), use_fp8=True, x_s=0.5,
-        #                             w_s=2 ** -9, grad_s=2 ** -19)
-        self.lm_head = LabelAttentionHead(input_dim=model_dim,
-                                          output_dim=next_multiple_of_n(vocab_size, n=128))
-        #nn.init.zeros_(self.lm_head.weight)  # @Grad62304977
+        self.lm_head = CastedLinear(model_dim, next_multiple_of_n(vocab_size, n=128), use_fp8=True, x_s=0.5,
+                                    w_s=2 ** -9, grad_s=2 ** -19)
+
+        nn.init.zeros_(self.lm_head.weight)  # @Grad62304977
         # Add learnable skip connection weights for decoder layers
         assert num_layers % 2 == 0
         self.skip_weights = nn.Parameter(torch.ones(num_layers // 2))
