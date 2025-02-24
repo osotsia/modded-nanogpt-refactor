@@ -194,7 +194,7 @@ decreasing_lr = [0.05, 0.04727273, 0.04454545, 0.04181818, 0.03909091,
                  0.02272727, 0.02]
 for i, block in enumerate(model.blocks):
     block_params = [p for n, p in block.named_parameters() if p.ndim >= 2 and "embed" not in n]
-    lr_i = [j + 0.04 for j in decreasing_lr][i]
+    lr_i = [j + 0.03 for j in decreasing_lr][i]
     hidden_matrix_param_groups.append({"params": block_params, "lr": lr_i})
 
 optimizer2 = Muon(hidden_matrix_param_groups, momentum=0.95, rank=rank, world_size=world_size)
