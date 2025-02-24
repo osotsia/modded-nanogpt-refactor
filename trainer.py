@@ -194,7 +194,7 @@ decreasing_lr = [0.05, 0.04727273, 0.04454545, 0.04181818, 0.03909091,
                  0.02272727, 0.02]
 for i, block in enumerate(model.blocks):
     block_params = [p for n, p in block.named_parameters() if p.ndim >= 2 and "embed" not in n]
-    lr_i = decreasing_lr[i]
+    lr_i = [i + 0.02 for i in decreasing_lr]
     hidden_matrix_param_groups.append({"params": block_params, "lr": lr_i})
 
 optimizer2 = Muon(hidden_matrix_param_groups, momentum=0.95, rank=rank, world_size=world_size)
@@ -411,8 +411,3 @@ print0(
 )
 
 dist.destroy_process_group()
-
-num_blocks = 12
-for i in range(12):
-    scale = 1.05 ** (-num_blocks - i + 1)
-    print(round(scale, 2), round(scale * 0.05, 2))
