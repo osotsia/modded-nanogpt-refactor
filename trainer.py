@@ -177,32 +177,9 @@ adam_params = [
 # small adam epsilon by @YouJiacheng. this is an alternate method of fixing the world_size dependence
 # discovered by @fernbear.bsky.social https://x.com/hi_tysam/status/1879692937589875094
 optimizer1 = torch.optim.Adam(adam_params, betas=(0.8, 0.95), eps=1e-10, fused=True)
-# optimizer2 = Muon(hidden_matrix_params, lr=0.05, momentum=0.95, rank=rank, world_size=world_size)
-# optimizers = [optimizer1, optimizer2]
-
-
-# Layer-wise learning rates
-hidden_matrix_param_groups = []
-num_blocks = len(model.blocks)
-base_lr = 0.05  # same as before
-
-increasing_lr = [0.05, 0.05272727, 0.05545455, 0.05818182, 0.06090909,
-                 0.06363636, 0.06636364, 0.06909091, 0.07181818, 0.07454545,
-                 0.07727273, 0.08]
-decreasing_lr_old = [0.05, 0.04727273, 0.04454545, 0.04181818, 0.03909091,
-                     0.03636364, 0.03363636, 0.03090909, 0.02818182, 0.02545455,
-                     0.02272727, 0.02]
-decreasing_lr = [0.06, 0.05727273, 0.05454545, 0.05181818, 0.04909091,
-                 0.04636364, 0.04363636, 0.04090909, 0.03818182, 0.03545455,
-                 0.03272727, 0.03]
-
-for i, block in enumerate(model.blocks):
-    block_params = [p for n, p in block.named_parameters() if p.ndim >= 2 and "embed" not in n]
-    lr_i = [j + 0.02 for j in decreasing_lr_old][i]
-    hidden_matrix_param_groups.append({"params": block_params, "lr": lr_i})
-
-optimizer2 = Muon(hidden_matrix_param_groups, momentum=0.95, rank=rank, world_size=world_size)
+optimizer2 = Muon(hidden_matrix_params, lr=0.05, momentum=0.95, rank=rank, world_size=world_size)
 optimizers = [optimizer1, optimizer2]
+
 for opt in optimizers:
     for group in opt.param_groups:
         group["initial_lr"] = group["lr"]
@@ -216,8 +193,7 @@ def get_lr(step: int) -> float:
     if step < cooldown_start_point:
         return 1.0  # Use the full learning rate before cooldown
 
-    # How far into cooldown we are
-    cooldown_progress = (total_steps - step) / (total_steps - cooldown_start_point)
+    cooldown_progress = (total_steps - step) / (total_steps - cooldown_start_point) # How far into cooldown we are
 
     # Linearly scale between 1.0 (start of cooldown) and 0.1 (end of training)
     return cooldown_progress * 1.0 + (1 - cooldown_progress) * 0.1
