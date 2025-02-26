@@ -305,15 +305,10 @@ class CausalSelfAttention(nn.Module):
         hdim = num_heads * head_dim
         std = 0.5 * (dim ** -0.5)
         bound = (3 ** 0.5) * std  # improved init scale by @YouJiacheng
-
-        # We now want two sets of Q,K,V
-        self.qkv_w = nn.Parameter(torch.empty(6, hdim, dim).uniform_(-bound, bound))
+        self.qkv_w = nn.Parameter(torch.empty(3, hdim, dim).uniform_(-bound, bound))
 
         # If we want to combine v with ve (an external embedding)
         self.lambdas = nn.Parameter(torch.tensor([0.5, 0.5]))
-
-        # Subtraction weight: out = out1 - lambda_diff * out2
-        self.lambda_diff = nn.Parameter(torch.tensor(1.0))
 
         # Rotary embedding
         self.rotary = Rotary(head_dim, max_seq_len)
@@ -326,17 +321,32 @@ class CausalSelfAttention(nn.Module):
         # inspired by learnable scalars used by @brendanh0gan https://x.com/hi_tysam/status/1879693583898591283
         self.attn_scale = 0.12
 
-    def _process_attn(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                      ve: torch.Tensor | None, block_mask):
-        # Normalize and apply rotary embedding
+    def forward(self, x: Tensor, ve: Tensor | None, block_mask: BlockMask):
+        """
+        x: [B, T, dim]
+        ve: optional external value embedding
+        block_mask: used for causal masking
+        """
+
+        B, T, D = x.shape
+        assert B == 1, "Must use batch size = 1 for FlexAttention"
+
+        # 1) Compute Q, K, V from x
+        q, k, v = F.linear(x, self.qkv_w.flatten(end_dim=1).type_as(x)) \
+            .view(B, T, 3 * self.num_heads, self.head_dim) \
+            .chunk(3, dim=-2)
+
+        # 2) Norm and rope
         q, k = norm(q), norm(k)
         q, k = self.rotary(q), self.rotary(k)
 
-        # Optionally combine external embedding
-        if ve is not None:  # skip mid-layers token value embeddings by @YouJiacheng
-            v = self.lambdas[0] * v + self.lambdas[1] * ve.view_as(v)
+        # 3) If external value embedding is provided, combine
+        if ve is not None:
+            v = self.lambdas[0] * v + self.lambdas[1] * ve.view_as(v)  # @KoszarskyB & @Grad62304977
+        # else:  # skip mid-layers token value embeddings by @YouJiacheng
+        #    v_new = self.lambdas[0] * v_new
 
-        # Compute attention
+        # 4) Run attention
         out = flex_attention(
             q.transpose(1, 2),
             k.transpose(1, 2),
@@ -344,29 +354,12 @@ class CausalSelfAttention(nn.Module):
             block_mask=block_mask,
             scale=self.attn_scale
         ).transpose(1, 2)
-        return out
 
-    def forward(self, x: torch.Tensor, ve: torch.Tensor | None, block_mask):
-        B, T, D = x.shape
-        assert B == 1, "Must use batch size = 1 for FlexAttention"
-
-        # Get q1, k1, v1, q2, k2, v2 from the bigger weight
-        q1, k1, v1, q2, k2, v2 = (
-            F.linear(x, self.qkv_w.flatten(end_dim=1).type_as(x))
-            .view(B, T, 6 * self.num_heads, self.head_dim)
-            .chunk(6, dim=-2)
-        )
-
-        # Process attention sets
-        out1 = self._process_attn(q1, k1, v1, ve, block_mask)
-        out2 = self._process_attn(q2, k2, v2, ve, block_mask)
-        out = out1 - self.lambda_diff * out2
-
-        # Combine heads and project
-        out = out.contiguous().view(B, T, self.num_heads * self.head_dim)
+        # 5) Re-assemble all head outputs side by side & project
+        out = out.contiguous() \
+            .view(B, T, self.num_heads * self.head_dim)
         out = self.c_proj(out)
         return out
-
 
 
 class MLP(nn.Module):
