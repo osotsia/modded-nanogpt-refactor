@@ -171,57 +171,130 @@ class Muon(torch.optim.Optimizer):
     def __init__(self, params, lr=0.02, momentum=0.95, nesterov=True, ns_steps=5, rank=0, world_size=1):
         self.rank = rank
         self.world_size = world_size
-        defaults = dict(lr=lr,
-                        momentum=momentum,
-                        nesterov=nesterov,
-                        ns_steps=ns_steps)
-        params: list[Tensor] = [*params]
+
+        # Default hyperparameters for the underlying SGD-like behavior
+        defaults = dict(
+            lr=lr,
+            momentum=momentum,
+            nesterov=nesterov,
+            ns_steps=ns_steps
+        )
+
+        # Convert params to a list if it isn't one
+        params = list(params)
+
+        # Group parameters by the total number of elements
+        # (useful if you flatten 2D or 4D parameters).
         param_groups = []
-        for size in {p.numel() for p in params}:
-            b = torch.empty(world_size, size, dtype=torch.bfloat16, device="cuda")
-            group = dict(params=[p for p in params if p.numel() == size],
-                         update_buffer=b,
-                         update_buffer_views=[b[i] for i in range(world_size)])
-            param_groups.append(group)
+        unique_sizes = {p.numel() for p in params}
+        for size in unique_sizes:
+            # For each size, create a buffer that will hold the "gathered" updates
+            update_buffer = torch.empty(
+                world_size, size,
+                dtype=torch.bfloat16,
+                device="cuda"
+            )
+
+            # Create views into update_buffer for each rank
+            update_buffer_views = [update_buffer[i] for i in range(world_size)]
+
+            # Collect parameters that match this size
+            grouped_params = [p for p in params if p.numel() == size]
+
+            param_groups.append(
+                dict(
+                    params=grouped_params,
+                    update_buffer=update_buffer,
+                    update_buffer_views=update_buffer_views
+                )
+            )
+
         super().__init__(param_groups, defaults)
 
     @torch.no_grad()
     def step(self):
+        """
+        Perform one step of Muon optimization. This includes:
+          1) Momentum update (and optional Nesterov update).
+          2) Newton-Schulz orthogonalization of the gradient.
+          3) Asynchronous distributed gathering of updates.
+          4) Applying the updates to parameters once all have been gathered.
+        """
         for group in self.param_groups:
             update_buffer: Tensor = group["update_buffer"]
-            update_buffer_views: list[Tensor] = group["update_buffer_views"]
-            # generate weight updates in distributed fashion
+            update_views: list[Tensor] = group["update_buffer_views"]
             params: list[Tensor] = group["params"]
+
+            # We'll reuse these each loop:
             handle = None
-            params_world = None
+            params_for_this_step = None
 
-            def update_prev():  # optimized Muon implementation contributed by @YouJiacheng
+            def _apply_previous_updates():
+                """
+                Wait for the previous asynchronous gather to complete,
+                then apply all gathered updates to the relevant parameters.
+                """
+                if handle is None:
+                    return  # No previous handle to wait on
                 handle.wait()
-                for p_world, g_world in zip(params_world, update_buffer_views):
-                    p_world.add_(g_world.view_as(p_world),
-                                 alpha=-group["lr"] * max(1, p_world.size(-2) / p_world.size(-1)) ** 0.5)
 
-            for base_i in range(len(params))[::self.world_size]:
-                if base_i + self.rank < len(params):
-                    p = params[base_i + self.rank]
-                    g = p.grad
-                    if g is None:
-                        # continue
-                        g = torch.zeros_like(p)  # Force a zero grad
+                # Apply each gathered update to the corresponding parameter
+                for p_target, g_update in zip(params_for_this_step, update_views):
+                    # Reshape the update to match the parameter shape
+                    # Multiply by a scaling factor for the learning rate
+                    alpha = -group["lr"] * max(1, p_target.size(-2) / p_target.size(-1)) ** 0.5
+                    p_target.add_(g_update.view_as(p_target), alpha=alpha)
+
+            # Iterate through parameters in chunks of size = world_size
+            # so each rank has its own parameter to handle.
+            for start_idx in range(0, len(params), self.world_size):
+                # Index for the current rank
+                param_idx = start_idx + self.rank
+
+                # Prepare the gradient we will gather
+                if param_idx < len(params):
+                    p = params[param_idx]
+                    grad = p.grad
+
+                    # If no gradient, create a zero one
+                    if grad is None:
+                        grad = torch.zeros_like(p)
+
+                    # Momentum buffer
                     state = self.state[p]
                     if "momentum_buffer" not in state:
-                        state["momentum_buffer"] = torch.zeros_like(g)
-                    buf: Tensor = state["momentum_buffer"]
-                    buf.lerp_(g, 1 - group["momentum"])
-                    g = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
-                    g = zeropower_via_newtonschulz5(g, steps=group["ns_steps"]).flatten()
+                        state["momentum_buffer"] = torch.zeros_like(grad)
+                    momentum_buf: Tensor = state["momentum_buffer"]
+
+                    # Update momentum buffer
+                    momentum_buf.lerp_(grad, 1 - group["momentum"])
+
+                    # If Nesterov is enabled, adjust gradient accordingly
+                    if group["nesterov"]:
+                        grad = grad.lerp_(momentum_buf, group["momentum"])
+                    else:
+                        grad = momentum_buf
+
+                    # Apply Newton-Schulz orthogonalization to the flattened gradient
+                    grad = zeropower_via_newtonschulz5(grad, steps=group["ns_steps"]).flatten()
+
                 else:
-                    g = update_buffer_views[self.rank]
-                if base_i > 0:
-                    update_prev()  # async all_gather instead of sync all_reduce by @YouJiacheng
-                handle = dist.all_gather_into_tensor(update_buffer, g, async_op=True)
-                params_world = params[base_i: base_i + self.world_size]
-            update_prev()
+                    # If we don't have a parameter at this index, just reuse the buffer
+                    grad = update_views[self.rank]
+
+                # Apply previous updates (if any) before we gather again
+                if start_idx > 0:
+                    _apply_previous_updates()
+
+                # Asynchronously gather updates from all ranks into update_buffer
+                handle = dist.all_gather_into_tensor(update_buffer, grad, async_op=True)
+
+                # We'll apply these updates in the next loop iteration
+                # (or after the loop, for the final iteration).
+                params_for_this_step = params[start_idx: start_idx + self.world_size]
+
+            # After the loop, apply the final round of updates
+            _apply_previous_updates()
 
 
 # -----------------------------------------------------------------------------
@@ -344,7 +417,7 @@ class CausalSelfAttention(nn.Module):
         if ve is not None:
             v = self.lambdas[0] * v + self.lambdas[1] * ve.view_as(v)  # @KoszarskyB & @Grad62304977
         # else:  # skip mid-layers token value embeddings by @YouJiacheng
-        #    v_new = self.lambdas[0] * v_new
+        #     v_new = self.lambdas[0] * v_new
 
         # 4) Run attention
         out = flex_attention(
@@ -379,7 +452,7 @@ class MLP(nn.Module):
 
 
 class Block(nn.Module):
-    def __init__(self, dim: int, num_heads: int, max_seq_len: int, layer_idx: int, args):
+    def __init__(self, dim: int, num_heads: int, max_seq_len: int, layer_idx: int):
         super().__init__()
         # skip attention of blocks.7 (the 8th layer) by @YouJiacheng
         self.attn = CausalSelfAttention(dim, num_heads, max_seq_len) if layer_idx != 7 else None
@@ -393,6 +466,7 @@ class Block(nn.Module):
             x = x + self.attn(norm(x), ve, block_mask)
         x = x + self.mlp(norm(x))
         return x
+
 
 # -----------------------------------------------------------------------------
 # The main model
@@ -410,7 +484,6 @@ class GPT(nn.Module):
                   num_heads=num_heads,
                   max_seq_len=max_seq_len,
                   layer_idx=i,
-                  args=args,
                   )
             for i in range(num_layers)
         ])
