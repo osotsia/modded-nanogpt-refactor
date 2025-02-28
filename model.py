@@ -467,6 +467,40 @@ class Block(nn.Module):
         x = x + self.mlp(norm(x))
         return x
 
+class LightweightAttentionSkipAggregator(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        # Project current features to query space
+        self.query_proj = nn.Linear(dim, dim, bias=False)
+        # Project skip features to key space
+        self.key_proj = nn.Linear(dim, dim, bias=False)
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x: Tensor, skip_features: list[Tensor]) -> Tensor:
+        """
+        x: [B, T, dim] - current features from the up pass
+        skip_features: list of N tensors, each [B, T, dim] - skip connection features from the down pass
+
+        Returns:
+            Aggregated skip connection tensor [B, T, dim] computed via lightweight attention over the N skip features.
+        """
+        # Stack skip features along a new dimension: [B, T, N, dim]
+        skip_stack = torch.stack(skip_features, dim=2)
+        B, T, N, D = skip_stack.shape
+
+        # Compute query from current features: [B, T, dim]
+        query = self.query_proj(x)
+        # Compute keys from skip features: [B, T, N, dim]
+        keys = self.key_proj(skip_stack)
+
+        # Compute scalar scores for each skip feature per token: [B, T, N]
+        scores = (query.unsqueeze(2) * keys).sum(dim=-1)
+        # Scale scores if needed (optional): scores = scores / (D ** 0.5)
+        attn_weights = self.softmax(scores)  # [B, T, N]
+
+        # Weighted sum over skip features
+        aggregated = (attn_weights.unsqueeze(-1) * skip_stack).sum(dim=2)  # [B, T, dim]
+        return aggregated
 
 # -----------------------------------------------------------------------------
 # The main model
@@ -497,6 +531,7 @@ class GPT(nn.Module):
         # Add learnable skip connection weights for decoder layers
         assert num_layers % 2 == 0
         self.skip_weights = nn.Parameter(torch.ones(num_layers // 2))
+        self.lightweight_aggregator = LightweightAttentionSkipAggregator(model_dim)
 
     def create_blockmasks(self, input_seq: Tensor, sliding_window_num_blocks: Tensor):
         BLOCK_SIZE = 128
@@ -575,8 +610,11 @@ class GPT(nn.Module):
 
         # "Up" pass: retrieve and apply skip connections
         for i in range(num_skip, len(self.blocks)):
-            x = x + self.skip_weights[i - num_skip] * skip_connections.pop()
+            # x = x + self.skip_weights[i - num_skip] * skip_connections.pop()
+            aggregated_skip = self.lightweight_aggregator(x, skip_connections)
+            x = x + aggregated_skip
             x = self.blocks[i](x, value_embeddings[i], x0, block_masks[i])
+            skip_connections.append(x)
 
         logits = self.lm_head(norm(x))
 
