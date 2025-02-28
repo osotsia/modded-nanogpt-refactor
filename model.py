@@ -472,9 +472,9 @@ class LightweightAttentionSkipAggregator(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
         # Project current features to query space
-        self.query_proj = CastedLinear(dim, dim, bias=False)
+        self.query_proj = CastedLinear(dim, dim)
         # Project skip features to key space
-        self.key_proj = CastedLinear(dim, dim, bias=False)
+        self.key_proj = CastedLinear(dim, dim)
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x: Tensor, skip_features: list[Tensor]) -> Tensor:
