@@ -539,11 +539,15 @@ class GPT(nn.Module):
 
         # "Up" pass: retrieve and apply skip connections
         for i in range(num_skip, len(self.blocks)):
-            x = x + self.skip_weights[i - num_skip] * skip_connections.pop()
-            # aggregated_skip = self.lightweight_aggregator(x, skip_connections)
-            # x = x + aggregated_skip
-            x = self.blocks[i](x, value_embeddings[i], x0, block_masks[i])
-            # skip_connections.append(x)
+            newversion = True
+            if newversion:
+                aggregated_skip = self.lightweight_aggregator(x, skip_connections)
+                x = x + aggregated_skip
+                x = self.blocks[i](x, value_embeddings[i], x0, block_masks[i])
+                skip_connections.append(x)
+            else:
+                x = x + self.skip_weights[i - num_skip] * skip_connections.pop()
+                x = self.blocks[i](x, value_embeddings[i], x0, block_masks[i])
 
         logits = self.lm_head(norm(x))
 
