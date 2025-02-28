@@ -616,7 +616,7 @@ class GPT(nn.Module):
             aggregated_skip = self.lightweight_aggregator(x, skip_connections)
             x = x + aggregated_skip
             x = self.blocks[i](x, value_embeddings[i], x0, block_masks[i])
-            skip_connections.append(x)
+            # skip_connections.append(x)
 
         logits = self.lm_head(norm(x))
 
