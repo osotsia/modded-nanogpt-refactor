@@ -467,13 +467,14 @@ class Block(nn.Module):
         x = x + self.mlp(norm(x))
         return x
 
+
 class LightweightAttentionSkipAggregator(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
         # Project current features to query space
-        self.query_proj = nn.Linear(dim, dim, bias=False)
+        self.query_proj = CastedLinear(dim, dim, bias=False)
         # Project skip features to key space
-        self.key_proj = nn.Linear(dim, dim, bias=False)
+        self.key_proj = CastedLinear(dim, dim, bias=False)
         self.softmax = nn.Softmax(dim=-1)
 
     def forward(self, x: Tensor, skip_features: list[Tensor]) -> Tensor:
@@ -501,6 +502,7 @@ class LightweightAttentionSkipAggregator(nn.Module):
         # Weighted sum over skip features
         aggregated = (attn_weights.unsqueeze(-1) * skip_stack).sum(dim=2)  # [B, T, dim]
         return aggregated
+
 
 # -----------------------------------------------------------------------------
 # The main model
