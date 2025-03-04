@@ -215,6 +215,19 @@ class Muon(torch.optim.Optimizer):
                     buf.lerp_(g, 1 - group["momentum"])
                     g = g.lerp_(buf, group["momentum"]) if group["nesterov"] else buf
                     g = zeropower_via_newtonschulz5(g, steps=group["ns_steps"]).flatten()
+
+                    # ---- Start cautious update ----
+                    # re-shape g back to p's shape
+                    # mask it by sign consistency with p.grad
+                    # re-flatten afterwards
+                    g_reshaped = g.view_as(p)
+                    grad_reshaped = p.grad if p.grad is not None else torch.zeros_like(p)
+                    mask = (g_reshaped * grad_reshaped > 0)
+                    mask_scale = mask.to(g.dtype).mean().add_(1e-8)
+                    g_reshaped.mul_(mask.to(g.dtype).div_(mask_scale))
+                    g = g_reshaped.flatten()
+                    # ---- End cautious update ----
+
                 else:
                     g = update_buffer_views[self.rank]
                 if base_i > 0:
