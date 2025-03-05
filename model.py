@@ -306,6 +306,7 @@ class CausalSelfAttention(nn.Module):
         # then multiply the first half by a sigmoid-like function of the second half
         self.hdim = num_heads * head_dim
         self.qkv_fc = CastedLinear(dim, 2 * 3 * self.hdim)
+        nn.init.zeros_(self.qkv_fc.weight) 
 
         # If we want to combine v with ve (an external embedding)
         self.lambdas = nn.Parameter(torch.tensor([0.5, 0.5]))
@@ -314,7 +315,7 @@ class CausalSelfAttention(nn.Module):
         self.rotary = Rotary(head_dim, max_seq_len)
 
         # Output projection
-        self.c_proj = CastedLinear(hdim, dim)
+        self.c_proj = CastedLinear(self.hdim, dim)
         nn.init.zeros_(self.c_proj.weight)  # zero init suggested by @Grad62304977
 
         # scale the attention logits by given constant, instead of the default head_dim**-0.5, by @leloykun
