@@ -301,12 +301,12 @@ class CausalSelfAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = head_dim
 
-        # GLU-style gating:
-        # output dimension = 2 * (3 * hdim) => we chunk the result in half,
-        # then multiply the first half by a sigmoid-like function of the second half
-        self.hdim = num_heads * head_dim
-        self.qkv_fc = CastedLinear(dim, 2 * 3 * self.hdim)
-        # nn.init.zeros_(self.qkv_fc.weight)
+        # merged QKV weights: suggested by many, implemented by @fernbear.bsky.social, and further improved by @YouJiacheng
+        # https://x.com/hi_tysam/status/1879699187107033311
+        hdim = num_heads * head_dim
+        std = 0.5 * (dim ** -0.5)
+        bound = (3 ** 0.5) * std  # improved init scale by @YouJiacheng
+        self.qkv_w = nn.Parameter(torch.empty(3, hdim, dim).uniform_(-bound, bound))
 
         # If we want to combine v with ve (an external embedding)
         self.lambdas = nn.Parameter(torch.tensor([0.5, 0.5]))
@@ -315,7 +315,7 @@ class CausalSelfAttention(nn.Module):
         self.rotary = Rotary(head_dim, max_seq_len)
 
         # Output projection
-        self.c_proj = CastedLinear(self.hdim, dim)
+        self.c_proj = CastedLinear(hdim, dim)
         nn.init.zeros_(self.c_proj.weight)  # zero init suggested by @Grad62304977
 
         # scale the attention logits by given constant, instead of the default head_dim**-0.5, by @leloykun
@@ -332,15 +332,9 @@ class CausalSelfAttention(nn.Module):
         B, T, D = x.shape
         assert B == 1, "Must use batch size = 1 for FlexAttention"
 
-        # 1) GLU-like gating for Q, K, V:
-        # [B, T, 2*(3*hdim)] -> chunk into two halves -> out = first_half * silu(second_half)
-        qkv_raw = self.qkv_fc(x)  # [B, T, 6*hdim]
-        half = 3 * self.hdim
-        qkv_val = qkv_raw[:, :, :half]  # [B, T, 3*hdim]
-        qkv_gate = qkv_raw[:, :, half:]  # [B, T, 3*hdim]
-        qkv = qkv_val * F.silu(qkv_gate)  # [B, T, 3*hdim]
-        # reshape into Q, K, V
-        q, k, v = qkv.view(B, T, 3 * self.num_heads, self.head_dim)\
+        # 1) Compute Q, K, V from x
+        q, k, v = F.linear(x, self.qkv_w.flatten(end_dim=1).type_as(x)) \
+            .view(B, T, 3 * self.num_heads, self.head_dim) \
             .chunk(3, dim=-2)
 
         # 2) Norm and rope
