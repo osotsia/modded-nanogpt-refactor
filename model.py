@@ -306,7 +306,7 @@ class CausalSelfAttention(nn.Module):
         # then multiply the first half by a sigmoid-like function of the second half
         self.hdim = num_heads * head_dim
         self.qkv_fc = CastedLinear(dim, 2 * 3 * self.hdim)
-        nn.init.zeros_(self.qkv_fc.weight) 
+        # nn.init.zeros_(self.qkv_fc.weight)
 
         # If we want to combine v with ve (an external embedding)
         self.lambdas = nn.Parameter(torch.tensor([0.5, 0.5]))
