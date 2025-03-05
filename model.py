@@ -301,12 +301,12 @@ class CausalSelfAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = head_dim
 
-        # merged QKV weights: suggested by many, implemented by @fernbear.bsky.social, and further improved by @YouJiacheng
-        # https://x.com/hi_tysam/status/1879699187107033311
+        # Instead of a single merged QKV matrix, do a small MLP-like block:
         hdim = num_heads * head_dim
-        std = 0.5 * (dim ** -0.5)
-        bound = (3 ** 0.5) * std  # improved init scale by @YouJiacheng
-        self.qkv_w = nn.Parameter(torch.empty(3, hdim, dim).uniform_(-bound, bound))
+        self.qkv_fc_up = CastedLinear(dim, hdim)  # up-projection
+        nn.init.zeros_(self.qkv_fc_up.weight)
+        self.qkv_fc_down = CastedLinear(hdim, 3 * hdim)  # down-projection
+        nn.init.zeros_(self.qkv_fc_down.weight)
 
         # If we want to combine v with ve (an external embedding)
         self.lambdas = nn.Parameter(torch.tensor([0.5, 0.5]))
@@ -332,9 +332,11 @@ class CausalSelfAttention(nn.Module):
         B, T, D = x.shape
         assert B == 1, "Must use batch size = 1 for FlexAttention"
 
-        # 1) Compute Q, K, V from x
-        q, k, v = F.linear(x, self.qkv_w.flatten(end_dim=1).type_as(x)) \
-            .view(B, T, 3 * self.num_heads, self.head_dim) \
+        # 1) MLP-like QKV transform: up -> relu^2 -> down -> split
+        tmp_up = self.qkv_fc_up(x)  # [B, T, hdim]
+        tmp_up_relu = F.relu(tmp_up).square()  # nonlinear activation
+        tmp_up_relu_down = self.qkv_fc_down(tmp_up_relu)  # [B, T, 3*hdim]
+        q, k, v = tmp_up_relu_down.view(B, T, 3 * self.num_heads, self.head_dim) \
             .chunk(3, dim=-2)
 
         # 2) Norm and rope
