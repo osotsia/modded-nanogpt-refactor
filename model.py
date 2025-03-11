@@ -373,8 +373,12 @@ class MLP(nn.Module):
 
     def forward(self, x: Tensor):
         x = self.c_fc(x)
-        x = F.relu(
-            x).square()  # https://arxiv.org/abs/2109.08668v2; ~1-2% better than GELU; suggested by @SKYLINEZ007 and @Grad62304977
+        # x = F.relu(
+        #     x).square()  # https://arxiv.org/abs/2109.08668v2; ~1-2% better than GELU; suggested by @SKYLINEZ007 and @Grad62304977
+
+        x1, x2 = x.split(x.size(-1) // 2, dim=-1)
+        x = x1 * F.relu(x2).square()
+
         x = self.c_proj(x)
         return x
 
