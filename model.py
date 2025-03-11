@@ -366,15 +366,16 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     def __init__(self, dim: int, multiplier: float | int = 4):
         super().__init__()
-        hdim = int(multiplier * dim)
-        self.c_fc = CastedLinear(dim, hdim)
-        self.c_proj = CastedLinear(hdim, dim)
+        hidden_dim = int(multiplier * dim)
+        self.c_fc = CastedLinear(dim, 2*hidden_dim)
+        self.c_proj = CastedLinear(hidden_dim, dim)
         nn.init.zeros_(self.c_proj.weight)  # zero init suggested by @Grad62304977
 
     def forward(self, x: Tensor):
         x = self.c_fc(x)
-        # x = F.relu(
-        #     x).square()  # https://arxiv.org/abs/2109.08668v2; ~1-2% better than GELU; suggested by @SKYLINEZ007 and @Grad62304977
+
+        # https://arxiv.org/abs/2109.08668v2; ~1-2% better than GELU; suggested by @SKYLINEZ007 and @Grad62304977
+        # x = F.relu(x).square()
 
         x1, x2 = x.split(x.size(-1) // 2, dim=-1)
         x = x1 * F.relu(x2).square()
