@@ -306,7 +306,7 @@ class CausalSelfAttention(nn.Module):
             kernel_size=3,
             padding=1,
             groups=head_dim,
-            # bias=True
+            bias=False,
         ).to(torch.bfloat16)
         self.dconv_k = nn.Conv1d(
             in_channels=head_dim,
@@ -314,7 +314,7 @@ class CausalSelfAttention(nn.Module):
             kernel_size=3,
             padding=1,
             groups=head_dim,
-            # bias=True
+            bias=False,
         ).to(torch.bfloat16)
         self.dconv_v = nn.Conv1d(
             in_channels=head_dim,
@@ -322,7 +322,7 @@ class CausalSelfAttention(nn.Module):
             kernel_size=3,
             padding=1,
             groups=head_dim,
-            # bias=True
+            bias=False,
         ).to(torch.bfloat16)
 
         self.num_heads = num_heads
@@ -366,11 +366,18 @@ class CausalSelfAttention(nn.Module):
 
         # [MDHA] Apply depthwise conv
         def _apply_dconv(tensor: Tensor, conv: nn.Conv1d) -> Tensor:
-            # Reshape to (B * num_heads, head_dim, T) so each head gets its own depthwise conv
-            tensor = tensor.transpose(1, 2).reshape(B * self.num_heads, self.head_dim, T)
+            B, T, nH, dH = tensor.shape
+            # 1) reorder to [B, nH, T, dH]
+            tensor = tensor.permute(0, 2, 1, 3)
+            # 2) flatten => [B*nH, dH, T]
+            tensor = tensor.reshape(B * nH, dH, T)
+            # 3) depthwise conv => still [B*nH, dH, T]
             tensor = conv(tensor)
-            # Reshape back to (B, T, num_heads, head_dim)
-            return tensor.reshape(B, self.num_heads, self.head_dim, T).transpose(1, 2)
+            # 4) un-flatten => [B, nH, dH, T]
+            tensor = tensor.reshape(B, nH, dH, T)
+            # 5) reorder back => [B, T, nH, dH]
+            tensor = tensor.permute(0, 2, 1, 3)
+            return tensor
 
         q = _apply_dconv(q, self.dconv_q)
         k = _apply_dconv(k, self.dconv_k)
