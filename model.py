@@ -298,6 +298,33 @@ class Rotary(nn.Module):
 class CausalSelfAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int, max_seq_len: int, head_dim=128):
         super().__init__()
+
+        # [MDHA] Add depthwise convolutions for Q, K, V
+        self.dconv_q = nn.Conv1d(
+            in_channels=head_dim,
+            out_channels=head_dim,
+            kernel_size=3,
+            padding=1,
+            groups=head_dim,
+            # bias=True
+        )
+        self.dconv_k = nn.Conv1d(
+            in_channels=head_dim,
+            out_channels=head_dim,
+            kernel_size=3,
+            padding=1,
+            groups=head_dim,
+            # bias=True
+        )
+        self.dconv_v = nn.Conv1d(
+            in_channels=head_dim,
+            out_channels=head_dim,
+            kernel_size=3,
+            padding=1,
+            groups=head_dim,
+            # bias=True
+        )
+
         self.num_heads = num_heads
         self.head_dim = head_dim
 
@@ -337,6 +364,18 @@ class CausalSelfAttention(nn.Module):
             .view(B, T, 3 * self.num_heads, self.head_dim) \
             .chunk(3, dim=-2)
 
+        # [MDHA] Apply depthwise conv
+        def _apply_dconv(tensor: Tensor, conv: nn.Conv1d) -> Tensor:
+            # Reshape to (B * num_heads, head_dim, T) so each head gets its own depthwise conv
+            tensor = tensor.transpose(1, 2).reshape(B * self.num_heads, self.head_dim, T)
+            tensor = conv(tensor)
+            # Reshape back to (B, T, num_heads, head_dim)
+            return tensor.reshape(B, self.num_heads, self.head_dim, T).transpose(1, 2)
+
+        q = _apply_dconv(q, self.dconv_q)
+        k = _apply_dconv(k, self.dconv_k)
+        v = _apply_dconv(v, self.dconv_v)
+
         # 2) Norm and rope
         q, k = norm(q), norm(k)
         q, k = self.rotary(q), self.rotary(k)
@@ -367,7 +406,7 @@ class MLP(nn.Module):
     def __init__(self, dim: int, multiplier: float | int = 4):
         super().__init__()
         hidden_dim = int(multiplier * dim)
-        self.c_fc = CastedLinear(dim, 2*hidden_dim)
+        self.c_fc = CastedLinear(dim, hidden_dim)
         self.c_proj = CastedLinear(hidden_dim, dim)
         nn.init.zeros_(self.c_proj.weight)  # zero init suggested by @Grad62304977
 
@@ -375,10 +414,7 @@ class MLP(nn.Module):
         x = self.c_fc(x)
 
         # https://arxiv.org/abs/2109.08668v2; ~1-2% better than GELU; suggested by @SKYLINEZ007 and @Grad62304977
-        # x = F.relu(x).square()
-
-        x1, x2 = x.split(x.size(-1) // 2, dim=-1)
-        x = x1 * F.relu(x2).square()
+        x = F.relu(x).square()
 
         x = self.c_proj(x)
         return x
