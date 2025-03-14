@@ -307,7 +307,7 @@ class CausalSelfAttention(nn.Module):
             padding=1,
             groups=head_dim,
             # bias=True
-        )
+        ).to(torch.bfloat16)
         self.dconv_k = nn.Conv1d(
             in_channels=head_dim,
             out_channels=head_dim,
@@ -315,7 +315,7 @@ class CausalSelfAttention(nn.Module):
             padding=1,
             groups=head_dim,
             # bias=True
-        )
+        ).to(torch.bfloat16)
         self.dconv_v = nn.Conv1d(
             in_channels=head_dim,
             out_channels=head_dim,
@@ -323,7 +323,7 @@ class CausalSelfAttention(nn.Module):
             padding=1,
             groups=head_dim,
             # bias=True
-        )
+        ).to(torch.bfloat16)
 
         self.num_heads = num_heads
         self.head_dim = head_dim
