@@ -369,7 +369,7 @@ class CausalSelfAttention(nn.Module):
             B, T, nH, dH = tensor.shape
             tensor = tensor.permute(0, 2, 3, 1).reshape(B * nH, dH, T)  # Reorder to [B*nH, dH, T]
             tensor = conv(tensor)  # Apply depthwise convolution
-            tensor = tensor.reshape(B, nH, dH, T).permute(0, 3, 1, 2)  # Restore shape to [B, T, nH, dH]
+            tensor = tensor.reshape(B, nH, dH, T).permute(0, 3, 1, 2).contiguous()  # Restore shape to [B, T, nH, dH]
             return tensor
 
         q = _apply_dconv(q, self.dconv_q)
