@@ -367,7 +367,8 @@ class CausalSelfAttention(nn.Module):
         # [MDHA] Apply depthwise conv
         def _apply_dconv(tensor: torch.Tensor, conv: nn.Conv1d) -> torch.Tensor:
             B, T, nH, dH = tensor.shape
-            tensor = tensor.permute(0, 2, 3, 1).reshape(B * nH, dH, T)  # Reorder to [B*nH, dH, T]
+            tensor = tensor.permute(0, 2, 3, 1).contiguous()  # Reorder to [B, nH, dH, T]
+            tensor = tensor.reshape(B * nH, dH, T).contiguous()  # Flatten properly
             tensor = conv(tensor)  # Apply depthwise convolution
             tensor = tensor.reshape(B, nH, dH, T).permute(0, 3, 1, 2).contiguous()  # Restore shape to [B, T, nH, dH]
             return tensor
