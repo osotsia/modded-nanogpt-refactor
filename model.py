@@ -367,10 +367,10 @@ class CausalSelfAttention(nn.Module):
         # [MDHA] Apply depthwise conv
         def _apply_dconv(tensor: torch.Tensor, conv: nn.Conv1d) -> torch.Tensor:
             B, T, nH, dH = tensor.shape
-            tensor = tensor.permute(0, 2, 3, 1).contiguous()  # Reorder to [B, nH, dH, T]
-            tensor = tensor.reshape(B * nH, dH, T).contiguous()  # Flatten properly
+            tensor = tensor.permute(0, 2, 3, 1)  # Reorder to [B, nH, dH, T]
+            tensor = tensor.reshape(B * nH, dH, T)  # Flatten properly
             tensor = conv(tensor)  # Apply depthwise convolution
-            tensor = tensor.reshape(B, nH, dH, T).permute(0, 3, 1, 2).contiguous()  # Restore shape to [B, T, nH, dH]
+            tensor = tensor.reshape(B, nH, dH, T).permute(0, 3, 1, 2)  # Restore shape to [B, T, nH, dH]
             return tensor
 
         q = _apply_dconv(q, self.dconv_q)
@@ -389,9 +389,9 @@ class CausalSelfAttention(nn.Module):
 
         # 4) Run attention
         out = flex_attention(
-            q.transpose(1, 2),
-            k.transpose(1, 2),
-            v.transpose(1, 2),
+            q.transpose(1, 2).contiguous(),
+            k.transpose(1, 2).contiguous(),
+            v.transpose(1, 2).contiguous(),
             block_mask=block_mask,
             scale=self.attn_scale
         ).transpose(1, 2)
