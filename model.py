@@ -295,47 +295,24 @@ class Rotary(nn.Module):
         return torch.cat((y1, y2), 3).type_as(x_BTHD)
 
 
-def _apply_dconv(tensor: torch.Tensor, conv: nn.Conv1d) -> torch.Tensor:
-    '''
-    [MDHA] Apply depthwise conv
-    '''
-    B, T, nH, dH = tensor.shape
-    tensor = tensor.permute(0, 2, 3, 1)  # Reorder to [B, nH, dH, T]
-    tensor = tensor.reshape(B * nH, dH, T)  # Flatten properly
-    tensor = conv(tensor)  # Apply depthwise convolution
-    tensor = tensor.reshape(B, nH, dH, T).permute(0, 3, 1, 2)  # Restore shape to [B, T, nH, dH]
-    return tensor
-
-
 class CausalSelfAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int, max_seq_len: int, head_dim=128):
         super().__init__()
 
-        # [MDHA] Add depthwise convolutions for Q, K, V
-        self.dconv_q = nn.Conv1d(
-            in_channels=head_dim,
-            out_channels=head_dim,
-            kernel_size=3,
-            padding=1,
-            groups=head_dim,
-            bias=False,
-        ).to(torch.bfloat16)
-        self.dconv_k = nn.Conv1d(
-            in_channels=head_dim,
-            out_channels=head_dim,
-            kernel_size=3,
-            padding=1,
-            groups=head_dim,
-            bias=False,
-        ).to(torch.bfloat16)
-        self.dconv_v = nn.Conv1d(
-            in_channels=head_dim,
-            out_channels=head_dim,
-            kernel_size=3,
-            padding=1,
-            groups=head_dim,
-            bias=False,
-        ).to(torch.bfloat16)
+        def create_depthwise_conv():
+            return nn.Conv1d(
+                in_channels=head_dim,
+                out_channels=head_dim,
+                kernel_size=3,
+                padding=1,
+                groups=head_dim,
+                bias=False,
+            ).to(torch.bfloat16)
+
+        # [MDHA]
+        self.dconv_q = create_depthwise_conv()
+        self.dconv_k = create_depthwise_conv()
+        self.dconv_v = create_depthwise_conv()
 
         self.num_heads = num_heads
         self.head_dim = head_dim
@@ -377,7 +354,19 @@ class CausalSelfAttention(nn.Module):
             .chunk(3, dim=-2)
 
         # 2) Convolution, norm and rope
-        q, k = _apply_dconv(q, self.dconv_q), _apply_dconv(k, self.dconv_k)
+        def _apply_depthwise_conv(tensor: torch.Tensor, conv: nn.Conv1d) -> torch.Tensor:
+            B, T, nH, dH = tensor.shape
+            tensor = tensor.permute(0, 2, 3, 1)  # Reorder to [B, nH, dH, T]
+            tensor = tensor.reshape(B * nH, dH, T)  # Flatten properly
+            tensor = conv(tensor)  # Apply depthwise convolution
+            tensor = tensor.reshape(B, nH, dH, T).permute(0, 3, 1, 2)  # Restore shape to [B, T, nH, dH]
+            return tensor
+
+        # [MDHA]
+        q, k, v = _apply_depthwise_conv(q, self.dconv_q), \
+            _apply_depthwise_conv(k, self.dconv_k), \
+            _apply_depthwise_conv(v, self.dconv_v)
+
         q, k = norm(q), norm(k)
         q, k = self.rotary(q), self.rotary(k)
 
