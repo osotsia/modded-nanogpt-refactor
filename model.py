@@ -375,7 +375,7 @@ class CausalSelfAttention(nn.Module):
 
         q = _apply_dconv(q, self.dconv_q)
         k = _apply_dconv(k, self.dconv_k)
-        v = _apply_dconv(v, self.dconv_v)
+        # v = _apply_dconv(v, self.dconv_v)
 
         # 2) Norm and rope
         q, k = norm(q), norm(k)
