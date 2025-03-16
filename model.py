@@ -295,6 +295,18 @@ class Rotary(nn.Module):
         return torch.cat((y1, y2), 3).type_as(x_BTHD)
 
 
+def _apply_dconv(tensor: torch.Tensor, conv: nn.Conv1d) -> torch.Tensor:
+    '''
+    [MDHA] Apply depthwise conv
+    '''
+    B, T, nH, dH = tensor.shape
+    tensor = tensor.permute(0, 2, 3, 1)  # Reorder to [B, nH, dH, T]
+    tensor = tensor.reshape(B * nH, dH, T)  # Flatten properly
+    tensor = conv(tensor)  # Apply depthwise convolution
+    tensor = tensor.reshape(B, nH, dH, T).permute(0, 3, 1, 2)  # Restore shape to [B, T, nH, dH]
+    return tensor
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int, max_seq_len: int, head_dim=128):
         super().__init__()
@@ -364,20 +376,8 @@ class CausalSelfAttention(nn.Module):
             .view(B, T, 3 * self.num_heads, self.head_dim) \
             .chunk(3, dim=-2)
 
-        # [MDHA] Apply depthwise conv
-        def _apply_dconv(tensor: torch.Tensor, conv: nn.Conv1d) -> torch.Tensor:
-            B, T, nH, dH = tensor.shape
-            tensor = tensor.permute(0, 2, 3, 1)  # Reorder to [B, nH, dH, T]
-            tensor = tensor.reshape(B * nH, dH, T)  # Flatten properly
-            tensor = conv(tensor)  # Apply depthwise convolution
-            tensor = tensor.reshape(B, nH, dH, T).permute(0, 3, 1, 2)  # Restore shape to [B, T, nH, dH]
-            return tensor
-
-        q = _apply_dconv(q, self.dconv_q)
-        k = _apply_dconv(k, self.dconv_k)
-        # v = _apply_dconv(v, self.dconv_v)
-
-        # 2) Norm and rope
+        # 2) Convolution, norm and rope
+        q, k = _apply_dconv(q, self.dconv_q), _apply_dconv(k, self.dconv_k)
         q, k = norm(q), norm(k)
         q, k = self.rotary(q), self.rotary(k)
 
