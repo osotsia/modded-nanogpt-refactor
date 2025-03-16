@@ -304,7 +304,7 @@ class CausalSelfAttention(nn.Module):
                 in_channels=head_dim,
                 out_channels=head_dim,
                 kernel_size=3,
-                padding=1,
+                padding=2,
                 groups=head_dim,
                 bias=False,
             ).to(torch.bfloat16)
@@ -363,7 +363,8 @@ class CausalSelfAttention(nn.Module):
             return tensor
 
         # [MDHA]
-        q, k, v = _apply_depthwise_conv(q, self.dconv_q), \
+        q, k, v = \
+            _apply_depthwise_conv(q, self.dconv_q), \
             _apply_depthwise_conv(k, self.dconv_k), \
             _apply_depthwise_conv(v, self.dconv_v)
 
