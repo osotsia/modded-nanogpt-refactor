@@ -363,13 +363,11 @@ class CausalSelfAttention(nn.Module):
             return tensor
 
         # [MDHA]
-        '''
         q, k, v = \
             _apply_depthwise_conv(q, self.dconv_q), \
             _apply_depthwise_conv(k, self.dconv_k), \
             _apply_depthwise_conv(v, self.dconv_v)
-        '''
-        
+
         q, k = norm(q), norm(k)
         q, k = self.rotary(q), self.rotary(k)
 
