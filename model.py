@@ -356,12 +356,12 @@ class CausalSelfAttention(nn.Module):
         # 2) Convolution, norm and rope
         def _apply_depthwise_conv(tensor: torch.Tensor, conv: nn.Conv1d) -> torch.Tensor:
             B, T, nH, dH = tensor.shape
-            tensor = tensor.permute(0, 2, 3, 1)  # Reorder to [B, nH, dH, T]
-            tensor = tensor.reshape(B * nH, dH, T)  # Flatten properly
+            tensor = tensor.permute(0, 2, 3, 1).contiguous()  # Reorder to [B, nH, dH, T]
+            tensor = tensor.reshape(B * nH, dH, T).contiguous()  # Flatten properly
             tensor = conv(tensor)  # Apply depthwise convolution
-            tensor = tensor[..., :T]  # causality
-            tensor = tensor.reshape(B, nH, dH, T).permute(0, 3, 1, 2)  # Restore shape to [B, T, nH, dH]
-            return tensor
+            tensor = tensor[..., :T].contiguous()  # causality
+            tensor = tensor.reshape(B, nH, dH, T).permute(0, 3, 1, 2).contiguous()  # Restore shape to [B, T, nH, dH]
+            return tensor.contiguous()
 
         # [MDHA]
         q, k, v = \
