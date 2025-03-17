@@ -304,7 +304,7 @@ class CausalSelfAttention(nn.Module):
                 in_channels=head_dim,
                 out_channels=head_dim,
                 kernel_size=3,
-                padding=2,
+                padding=2,  # causality
                 groups=head_dim,
                 bias=False,
             ).to(torch.bfloat16)
@@ -359,6 +359,7 @@ class CausalSelfAttention(nn.Module):
             tensor = tensor.permute(0, 2, 3, 1)  # Reorder to [B, nH, dH, T]
             tensor = tensor.reshape(B * nH, dH, T)  # Flatten properly
             tensor = conv(tensor)  # Apply depthwise convolution
+            tensor = tensor[..., :T]  # causality
             tensor = tensor.reshape(B, nH, dH, T).permute(0, 3, 1, 2)  # Restore shape to [B, T, nH, dH]
             return tensor
 
