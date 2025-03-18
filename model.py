@@ -338,6 +338,9 @@ class CausalSelfAttention(nn.Module):
         # inspired by learnable scalars used by @brendanh0gan https://x.com/hi_tysam/status/1879693583898591283
         self.attn_scale = 0.12
 
+        # --- [Forgetting Attention] ---
+        self.forget_proj = CastedLinear(dim, num_heads)
+
     def forward(self, x: Tensor, ve: Tensor | None, block_mask: BlockMask):
         """
         x: [B, T, dim]
@@ -378,13 +381,23 @@ class CausalSelfAttention(nn.Module):
         # else:  # skip mid-layers token value embeddings by @YouJiacheng
         #     v_new = self.lambdas[0] * v_new
 
+        # --- [Forgetting Attention] ---
+        f = torch.sigmoid(self.forget_proj(x))       # shape: [B, T, num_heads]
+        log_f = torch.log(torch.clamp(f, min=1e-7))  # avoid log(0)
+        c = torch.cumsum(log_f, dim=1)
+
+        def forgetting_score_mod(score, b, h, q_idx, kv_idx):
+            return score + (c[b, q_idx, h] - c[b, kv_idx, h])
+        # -------------------------------------------------------------
+
         # 4) Run attention
         out = flex_attention(
             q.transpose(1, 2),
             k.transpose(1, 2),
             v.transpose(1, 2),
             block_mask=block_mask,
-            scale=self.attn_scale
+            scale=self.attn_scale,
+            score_mod=forgetting_score_mod,
         ).transpose(1, 2)
 
         # 5) Re-assemble all head outputs side by side & project
