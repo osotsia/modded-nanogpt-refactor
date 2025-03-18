@@ -385,9 +385,10 @@ class CausalSelfAttention(nn.Module):
         f = torch.sigmoid(self.forget_proj(x))       # shape: [B, T, num_heads]
         log_f = torch.log(torch.clamp(f, min=1e-7))  # avoid log(0)
         c = torch.cumsum(log_f, dim=1)
+        c2 = c.clone()
 
         def forgetting_score_mod(score, b, h, q_idx, kv_idx):
-            return score + (c[b, q_idx, h] - c[b, kv_idx, h])
+            return score + (c[b, q_idx, h] - c2[b, kv_idx, h])
         # -------------------------------------------------------------
 
         # 4) Run attention
