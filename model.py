@@ -299,6 +299,7 @@ class CausalSelfAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int, max_seq_len: int, head_dim=128):
         super().__init__()
 
+        # Experiments -------------------------------------------------
         def create_depthwise_conv():
             return nn.Conv1d(
                 in_channels=head_dim,
@@ -316,6 +317,12 @@ class CausalSelfAttention(nn.Module):
 
         # --- [Forgetting Attention] ---
         self.forget_proj = CastedLinear(dim, num_heads)
+
+        # [KV blend]
+        self.alpha = nn.Parameter(torch.rand(num_heads))
+        self.beta = nn.Parameter(torch.rand(num_heads))
+
+        # -------------------------------------------------------------
 
         self.num_heads = num_heads
         self.head_dim = head_dim
@@ -341,7 +348,6 @@ class CausalSelfAttention(nn.Module):
         # inspired by learnable scalars used by @brendanh0gan https://x.com/hi_tysam/status/1879693583898591283
         self.attn_scale = 0.12
 
-
     def forward(self, x: Tensor, ve: Tensor | None, block_mask: BlockMask):
         """
         x: [B, T, dim]
@@ -357,31 +363,45 @@ class CausalSelfAttention(nn.Module):
             .view(B, T, 3 * self.num_heads, self.head_dim) \
             .chunk(3, dim=-2)
 
-        # -------------------------------------------------------------
-        # MDHA and FoX [incomplete]
-        def _apply_depthwise_conv(tensor: torch.Tensor, conv: nn.Conv1d) -> torch.Tensor:
-            B, T, nH, dH = tensor.shape
-            tensor = tensor.permute(0, 2, 3, 1)  # Reorder to [B, nH, dH, T]
-            tensor = tensor.reshape(B * nH, dH, T)  # Flatten properly
-            tensor = conv(tensor)  # Apply depthwise convolution
-            tensor = tensor[..., :T]  # causality
-            tensor = tensor.reshape(B, nH, dH, T).permute(0, 3, 1, 2)  # Restore shape to [B, T, nH, dH]
-            return tensor
-
+        # Experiments -------------------------------------------------
+        runthis = False
         # --- [MDHA] ---
-        #q, k, v = \
-        #    _apply_depthwise_conv(q, self.dconv_q), \
-        #    _apply_depthwise_conv(k, self.dconv_k), \
-        #    _apply_depthwise_conv(v, self.dconv_v)
+        if runthis:
+            def _apply_depthwise_conv(tensor: torch.Tensor, conv: nn.Conv1d) -> torch.Tensor:
+                B, T, nH, dH = tensor.shape
+                tensor = tensor.permute(0, 2, 3, 1)  # Reorder to [B, nH, dH, T]
+                tensor = tensor.reshape(B * nH, dH, T)  # Flatten properly
+                tensor = conv(tensor)  # Apply depthwise convolution
+                tensor = tensor[..., :T]  # causality
+                tensor = tensor.reshape(B, nH, dH, T).permute(0, 3, 1, 2)  # Restore shape to [B, T, nH, dH]
+                return tensor
+
+            q, k, v = \
+                _apply_depthwise_conv(q, self.dconv_q), \
+                    _apply_depthwise_conv(k, self.dconv_k), \
+                    _apply_depthwise_conv(v, self.dconv_v)
 
         # --- [Forgetting Attention] ---
-        f = torch.sigmoid(self.forget_proj(x))       # shape: [B, T, num_heads]
-        log_f = torch.log(torch.clamp(f, min=1e-7))  # avoid log(0)
-        c = torch.cumsum(log_f, dim=1)
-        c2 = c.clone()
+        if runthis:
+            f = torch.sigmoid(self.forget_proj(x))  # shape: [B, T, num_heads]
+            log_f = torch.log(torch.clamp(f, min=1e-7))  # avoid log(0)
+            c = torch.cumsum(log_f, dim=1)
+            c2 = c.clone()
 
-        def forgetting_score_mod(score, b, h, q_idx, kv_idx):
-            return score + (c[b, q_idx, h] - c2[b, kv_idx, h])
+            def forgetting_score_mod(score, b, h, q_idx, kv_idx):
+                return score + (c[b, q_idx, h] - c2[b, kv_idx, h])
+
+        # [KV shift] (data independent)
+        def shift_and_blend(tensor, param):
+            # shift right by 1, then blend with alpha
+            shifted = torch.roll(tensor, shifts=1, dims=1)
+            shifted[:, 0] = tensor[:, 0]
+            alpha = param.view(1, 1, -1, 1)  # broadcast shape
+            return alpha * tensor + (1.0 - alpha) * shifted
+
+        k = shift_and_blend(k, self.alpha)
+        v = shift_and_blend(v, self.beta)
+
         # -------------------------------------------------------------
 
         # 2) Norm and rope
@@ -401,7 +421,7 @@ class CausalSelfAttention(nn.Module):
             v.transpose(1, 2),
             block_mask=block_mask,
             scale=self.attn_scale,
-            score_mod=forgetting_score_mod,
+            # score_mod=forgetting_score_mod,
         ).transpose(1, 2)
 
         # 5) Re-assemble all head outputs side by side & project
