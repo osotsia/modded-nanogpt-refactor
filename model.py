@@ -309,10 +309,13 @@ class CausalSelfAttention(nn.Module):
                 bias=False,
             ).to(torch.bfloat16)
 
-        # [MDHA]
+        # --- [MDHA] ---
         self.dconv_q = create_depthwise_conv()
         self.dconv_k = create_depthwise_conv()
         self.dconv_v = create_depthwise_conv()
+
+        # --- [Forgetting Attention] ---
+        self.forget_proj = CastedLinear(dim, num_heads)
 
         self.num_heads = num_heads
         self.head_dim = head_dim
@@ -338,8 +341,6 @@ class CausalSelfAttention(nn.Module):
         # inspired by learnable scalars used by @brendanh0gan https://x.com/hi_tysam/status/1879693583898591283
         self.attn_scale = 0.12
 
-        # --- [Forgetting Attention] ---
-        self.forget_proj = CastedLinear(dim, num_heads)
 
     def forward(self, x: Tensor, ve: Tensor | None, block_mask: BlockMask):
         """
@@ -356,7 +357,8 @@ class CausalSelfAttention(nn.Module):
             .view(B, T, 3 * self.num_heads, self.head_dim) \
             .chunk(3, dim=-2)
 
-        # 2) Convolution, norm and rope
+        # -------------------------------------------------------------
+        # MDHA and FoX [incomplete]
         def _apply_depthwise_conv(tensor: torch.Tensor, conv: nn.Conv1d) -> torch.Tensor:
             B, T, nH, dH = tensor.shape
             tensor = tensor.permute(0, 2, 3, 1)  # Reorder to [B, nH, dH, T]
@@ -366,20 +368,11 @@ class CausalSelfAttention(nn.Module):
             tensor = tensor.reshape(B, nH, dH, T).permute(0, 3, 1, 2)  # Restore shape to [B, T, nH, dH]
             return tensor
 
-        # [MDHA]
+        # --- [MDHA] ---
         #q, k, v = \
         #    _apply_depthwise_conv(q, self.dconv_q), \
         #    _apply_depthwise_conv(k, self.dconv_k), \
         #    _apply_depthwise_conv(v, self.dconv_v)
-
-        q, k = norm(q), norm(k)
-        q, k = self.rotary(q), self.rotary(k)
-
-        # 3) If external value embedding is provided, combine
-        if ve is not None:
-            v = self.lambdas[0] * v + self.lambdas[1] * ve.view_as(v)  # @KoszarskyB & @Grad62304977
-        # else:  # skip mid-layers token value embeddings by @YouJiacheng
-        #     v_new = self.lambdas[0] * v_new
 
         # --- [Forgetting Attention] ---
         f = torch.sigmoid(self.forget_proj(x))       # shape: [B, T, num_heads]
@@ -390,6 +383,16 @@ class CausalSelfAttention(nn.Module):
         def forgetting_score_mod(score, b, h, q_idx, kv_idx):
             return score + (c[b, q_idx, h] - c2[b, kv_idx, h])
         # -------------------------------------------------------------
+
+        # 2) Norm and rope
+        q, k = norm(q), norm(k)
+        q, k = self.rotary(q), self.rotary(k)
+
+        # 3) If external value embedding is provided, combine
+        if ve is not None:
+            v = self.lambdas[0] * v + self.lambdas[1] * ve.view_as(v)  # @KoszarskyB & @Grad62304977
+        # else:  # skip mid-layers token value embeddings by @YouJiacheng
+        #     v_new = self.lambdas[0] * v_new
 
         # 4) Run attention
         out = flex_attention(
