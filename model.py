@@ -319,8 +319,8 @@ class CausalSelfAttention(nn.Module):
         self.forget_proj = CastedLinear(dim, num_heads)
 
         # [KV blend]
-        self.alpha = nn.Parameter(torch.rand(num_heads))
-        self.beta = nn.Parameter(torch.rand(num_heads))
+        self.alpha = nn.Parameter(torch.rand(num_heads, dtype=torch.bfloat16))
+        self.beta = nn.Parameter(torch.rand(num_heads, dtype=torch.bfloat16))
 
         # -------------------------------------------------------------
 
