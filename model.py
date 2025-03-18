@@ -300,6 +300,7 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
 
         # Experiments -------------------------------------------------
+        # --- [MDHA] ---
         def create_depthwise_conv():
             return nn.Conv1d(
                 in_channels=head_dim,
@@ -310,7 +311,6 @@ class CausalSelfAttention(nn.Module):
                 bias=False,
             ).to(torch.bfloat16)
 
-        # --- [MDHA] ---
         self.dconv_q = create_depthwise_conv()
         self.dconv_k = create_depthwise_conv()
         self.dconv_v = create_depthwise_conv()
@@ -364,8 +364,8 @@ class CausalSelfAttention(nn.Module):
             .chunk(3, dim=-2)
 
         # Experiments -------------------------------------------------
-        runthis = False
         # --- [MDHA] ---
+        runthis = False
         if runthis:
             def _apply_depthwise_conv(tensor: torch.Tensor, conv: nn.Conv1d) -> torch.Tensor:
                 B, T, nH, dH = tensor.shape
@@ -376,12 +376,12 @@ class CausalSelfAttention(nn.Module):
                 tensor = tensor.reshape(B, nH, dH, T).permute(0, 3, 1, 2)  # Restore shape to [B, T, nH, dH]
                 return tensor
 
-            q, k, v = \
-                _apply_depthwise_conv(q, self.dconv_q), \
-                    _apply_depthwise_conv(k, self.dconv_k), \
-                    _apply_depthwise_conv(v, self.dconv_v)
+            q = _apply_depthwise_conv(q, self.dconv_q)
+            k = _apply_depthwise_conv(k, self.dconv_k)
+            v = _apply_depthwise_conv(v, self.dconv_v)
 
         # --- [Forgetting Attention] ---
+        runthis = False
         if runthis:
             f = torch.sigmoid(self.forget_proj(x))  # shape: [B, T, num_heads]
             log_f = torch.log(torch.clamp(f, min=1e-7))  # avoid log(0)
@@ -392,15 +392,17 @@ class CausalSelfAttention(nn.Module):
                 return score + (c[b, q_idx, h] - c2[b, kv_idx, h])
 
         # [KV shift] (data independent)
-        def shift_and_blend(tensor, param):
-            # shift right by 1, then blend with alpha
-            shifted = torch.roll(tensor, shifts=1, dims=1)
-            shifted[:, 0] = tensor[:, 0]
-            alpha = param.view(1, 1, -1, 1)  # broadcast shape
-            return alpha * tensor + (1.0 - alpha) * shifted
+        runthis = True
+        if runthis:
+            def shift_and_blend(tensor, param):
+                # shift right by 1, then blend with alpha
+                shifted = torch.roll(tensor, shifts=1, dims=1)
+                shifted[:, 0] = tensor[:, 0]
+                alpha = param.view(1, 1, -1, 1)  # broadcast shape
+                return alpha * tensor + (1.0 - alpha) * shifted
 
-        k = shift_and_blend(k, self.alpha)
-        v = shift_and_blend(v, self.beta)
+            k = shift_and_blend(k, self.alpha)
+            v = shift_and_blend(v, self.beta)
 
         # -------------------------------------------------------------
 
