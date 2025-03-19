@@ -383,16 +383,15 @@ class CausalSelfAttention(nn.Module):
         # --- [Forgetting Attention] ---
         runthis = False
         if runthis:
-            f = torch.sigmoid(self.forget_proj(x))  # shape: [B, T, num_heads]
-            log_f = torch.log(torch.clamp(f, min=1e-7))  # avoid log(0)
-            c = torch.cumsum(log_f, dim=1)
-            c2 = c.clone()
+            ff = torch.sigmoid(self.forget_proj(x))  # shape: [B, T, num_heads]
+            log_ff = torch.log(torch.clamp(ff, min=1e-7))
+            c17 = torch.cumsum(log_ff, dim=1)
 
             def forgetting_score_mod(score, b, h, q_idx, kv_idx):
-                return score + (c[b, q_idx, h] - c2[b, kv_idx, h])
+                return score + (c17[b, q_idx, h] - c17[b, kv_idx, h])
 
         # [KV shift] (data independent)
-        runthis = True
+        runthis = False
         if runthis:
             def shift_and_blend(tensor, param):
                 # shift right by 1, then blend with alpha
@@ -423,7 +422,7 @@ class CausalSelfAttention(nn.Module):
             v.transpose(1, 2),
             block_mask=block_mask,
             scale=self.attn_scale,
-            # score_mod=forgetting_score_mod,
+            score_mod=forgetting_score_mod,
         ).transpose(1, 2)
 
         # 5) Re-assemble all head outputs side by side & project
