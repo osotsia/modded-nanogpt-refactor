@@ -317,6 +317,7 @@ class CausalSelfAttention(nn.Module):
 
         # --- [Forgetting Attention] ---
         self.forget_proj = CastedLinear(dim, num_heads)
+        nn.init.zeros_(self.forget_proj.weight)
 
         # [KV blend]
         self.alpha = nn.Parameter(torch.rand(num_heads, dtype=torch.bfloat16))
@@ -381,7 +382,7 @@ class CausalSelfAttention(nn.Module):
             v = _apply_depthwise_conv(v, self.dconv_v)
 
         # --- [Forgetting Attention] ---
-        runthis = False
+        runthis = True
         if runthis:
             ff = torch.sigmoid(self.forget_proj(x))  # shape: [B, T, num_heads]
             log_ff = torch.log(torch.clamp(ff, min=1e-7))
