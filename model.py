@@ -383,7 +383,6 @@ class CausalSelfAttention(nn.Module):
 
         # --- [Forgetting Attention] ---
         runthis = True
-        forgetting_score_mod = None
         if runthis:
             ff = torch.sigmoid(self.forget_proj(x))  # shape: [B, T, num_heads]
             log_ff = torch.log(torch.clamp(ff, min=1e-7))
@@ -392,6 +391,8 @@ class CausalSelfAttention(nn.Module):
 
             def forgetting_score_mod(score, b, h, q_idx, kv_idx):
                 return score + (c17[b, q_idx, h] - c18[b, kv_idx, h])
+        else:
+            forgetting_score_mod = None
 
         # [KV shift] (data independent)
         runthis = False
