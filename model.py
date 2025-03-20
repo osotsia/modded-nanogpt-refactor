@@ -388,7 +388,7 @@ class CausalSelfAttention(nn.Module):
             ff = torch.sigmoid(self.forget_proj(x))  # shape: [B, T, num_heads]
             log_ff = torch.log(torch.clamp(ff, min=1e-7))
             c17 = torch.cumsum(log_ff, dim=1)
-            c18 = c17.clone()
+            c18 = torch.cumsum(log_ff, dim=1)
 
             def forgetting_score_mod(score, b, h, q_idx, kv_idx):
                 return score + (c17[b, q_idx, h] - c18[b, kv_idx, h])
