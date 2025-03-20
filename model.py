@@ -382,7 +382,7 @@ class CausalSelfAttention(nn.Module):
             v = _apply_depthwise_conv(v, self.dconv_v)
 
         # --- [Forgetting Attention] ---
-        runthis = False
+        runthis = True
         forgetting_score_mod = None
         if runthis:
             ff = torch.sigmoid(self.forget_proj(x))  # shape: [B, T, num_heads]
